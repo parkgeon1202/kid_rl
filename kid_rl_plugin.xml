@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<library path="kid_rl">
+  <class
+    name="kid_rl/KidRlController"
+    type="kid_rl::KidRlController"
+    base_class_type="controller_interface::ControllerInterface">
+    <description>ONNX locomotion policy position controller.</description>
+  </class>
+</library>

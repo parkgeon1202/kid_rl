@@ -1,0 +1,101 @@
+<?xml version="1.0"?>
+<!--
+  /robot_description 에 실릴 제어 스키마용 문서. 실제 로봇 URDF가 아니다.
+  <ros2_control> 블록을 controller_manager 에 전달하기 위한 임시 봉투다.
+
+  DYNAMIXEL position I/O에는 관절 이름이 주로 쓰이지만, 이 파일의 TF(좌표계
+  간 변환), 축, 원점, 부모–자식 관계는 모두 가짜이다. 따라서 RViz, 순기구학,
+  충돌 검사, IMU 프레임 변환에 이 문서를 사용하면 안 된다. launch도
+  /joint_states가 이 더미 TF로 변환되지 않도록 연결을 막아 두었다.
+
+  그래도 <joint> 는 25개 전부 있어야 한다. 형식 요건이다:
+  hardware_interface 의 parse_control_resources_from_urdf() 가 <ros2_control> 을
+  다 읽은 뒤 urdf::Model::initString() 을 한 번 더 호출하고
+  (component_parser.cpp:1029-1033), 그 다음 <ros2_control> 의 모든 joint 를
+  URDF 에서 찾는다:
+
+    auto urdf_joint = model.getJoint(joint.name);
+    if (!urdf_joint) { throw ... "Joint '{}' not found in URDF" }
+    (hardware_interface 4.47.0, component_parser.cpp:1036-1044)
+
+  없으면 첫 관절(torso_yaw)에서 예외가 나고 controller_manager 가 이를 삼킨다
+  (controller_manager.cpp:869-875). 노드는 살아 있지만 하드웨어 인터페이스가
+  0개라 두 스포너가 모두 실패한다. 그래서 아래에 더미 관절 25개를 만든다.
+  기구학적으로는 의미 없는 트리(전부 base_link 의 자식)이고, 맞아야 하는 것은
+  이름과 <limit> 뿐이다.
+
+  교체의 기준은 MJLab의 kid_RL.xml이다. 그 모델은 25개 구동 관절과
+  8개 passive linkage joint(모터가 직접 구동하지 않는 링크 관절)를 가진다.
+  MuJoCo tendon(여러 관절을 묶는 제약)을 URDF 트리로 그대로 표현할 수 없으므로,
+  실제 URDF 교체와 crank encoder(크랭크 축 엔코더) 변환은 별도 검증이 필요하다.
+
+  이름 중 실제로 무언가와 맞아야 하는 것은 관절 이름뿐이다:
+    kid_dynamixel.ros2_control.xacro 의 <joint name="...">
+      == config/controllers.yaml 의 kid_rl.joints
+  robot name, link name, ros2_control name 은 로그에 찍히는 라벨이다.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="kid_rl">
+
+  <link name="base_link"/>
+
+  <!-- 더미 관절. lower/upper 는 config/controllers.yaml 의
+       joint_position_min/max 와 반드시 같아야 한다(둘 중 하나만 고치면 어긋난다).
+       effort/velocity 는 데이터시트에서 유도한 값이 아니라 넉넉히 잡은 자리표시자다:
+       controller_manager 의 enforce_command_limits 기본값이 false 라 지금은
+       아무 제약도 걸지 않는다. 그 옵션을 켤 생각이면 실측해서 다시 채울 것.
+       (velocity 를 데이터시트 무부하 속도로 적고 enforcement 를 켜면 무릎 스윙이
+        잘린다 — controllers.yaml 의 target_rate_limit 주석 참고) -->
+  <xacro:macro name="kid_dummy_joint" params="name lower upper">
+    <link name="${name}_link"/>
+    <joint name="${name}" type="revolute">
+      <parent link="base_link"/>
+      <child link="${name}_link"/>
+      <origin xyz="0 0 0"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="${lower}" upper="${upper}" effort="10.0" velocity="10.0"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- 상한 3.14005 는 3.142 의 오타가 아니다: Goal Position 분해능이
+       0.0015339807878856412 rad, 오프셋 -3.14159265359 rad 이라
+       3.142 rad 는 틱 4096 으로 변환되어 0..4095 범위를 벗어난다.
+       Sync Write 는 상태 패킷이 없으므로 그 명령은 조용히 버려진다.
+       4095 틱 = 3.14005867 rad 이 실제 표현 가능한 최댓값이다. -->
+  <xacro:kid_dummy_joint name="torso_yaw"              lower="-3.142"    upper="3.14005"/>
+  <xacro:kid_dummy_joint name="neck_yaw"               lower="-3.14159"  upper="3.14159"/>
+  <xacro:kid_dummy_joint name="head_pitch"             lower="-1.5"      upper="1.57"/>
+  <xacro:kid_dummy_joint name="left_shoulder_pitch"    lower="-3.14159"  upper="3.14159"/>
+  <xacro:kid_dummy_joint name="left_shoulder_roll"     lower="-1.138"    upper="1.5"/>
+  <xacro:kid_dummy_joint name="left_shoulder_yaw"      lower="-3.14159"  upper="3.14159"/>
+  <xacro:kid_dummy_joint name="left_elbow_pitch"       lower="-2.443461" upper="2.089"/>
+  <xacro:kid_dummy_joint name="left_wrist_pitch"       lower="-1.34"     upper="0.119"/>
+  <xacro:kid_dummy_joint name="right_shoulder_pitch"   lower="-3.14159"  upper="3.14159"/>
+  <xacro:kid_dummy_joint name="right_shoulder_roll"    lower="-1.5"      upper="1.138"/>
+  <xacro:kid_dummy_joint name="right_shoulder_yaw"     lower="-3.14159"  upper="3.14159"/>
+  <xacro:kid_dummy_joint name="right_elbow_pitch"      lower="-2.496"    upper="2.443461"/>
+  <xacro:kid_dummy_joint name="right_wrist_pitch"      lower="-1.34"     upper="0.119"/>
+  <xacro:kid_dummy_joint name="left_hip_yaw"           lower="-3.142"    upper="3.14005"/>
+  <xacro:kid_dummy_joint name="left_hip_roll_crank"    lower="-1.186824" upper="1.186824"/>
+  <xacro:kid_dummy_joint name="left_hip_pitch"         lower="-2.021"    upper="1.036"/>
+  <xacro:kid_dummy_joint name="left_knee_pitch"        lower="-1.594"    upper="1.57"/>
+  <xacro:kid_dummy_joint name="left_ankle_pitch"       lower="-1.715"    upper="0.934"/>
+  <xacro:kid_dummy_joint name="left_ankle_roll_crank"  lower="-1.047198" upper="1.396263"/>
+  <xacro:kid_dummy_joint name="right_hip_yaw"          lower="-3.142"    upper="3.14005"/>
+  <xacro:kid_dummy_joint name="right_hip_roll_crank"   lower="-1.186824" upper="1.186824"/>
+  <xacro:kid_dummy_joint name="right_hip_pitch"        lower="-1.036"    upper="2.021"/>
+  <xacro:kid_dummy_joint name="right_knee_pitch"       lower="-1.57"     upper="1.594"/>
+  <xacro:kid_dummy_joint name="right_ankle_pitch"      lower="-0.934"    upper="1.715"/>
+  <xacro:kid_dummy_joint name="right_ankle_roll_crank" lower="-1.047198" upper="1.396263"/>
+
+  <xacro:arg name="port" default="/dev/ttyUSB-U2D2"/>
+  <!-- 3 Mbps -> 1 Mbps (2026-09-23). 서보 EEPROM 의 Baud Rate 도 함께 바꿔야 한다. -->
+  <xacro:arg name="baud" default="1000000"/>
+  <!-- controller_manager update_rate 를 넘을 수 없다. 같게 두면 "매 제어 틱마다
+       읽고 쓴다"는 뜻이다. controllers.yaml 의 update_rate 와 함께 바꿀 것. -->
+  <xacro:arg name="rw_rate" default="50"/>
+
+  <xacro:include filename="$(find kid_rl)/description/kid_dynamixel.ros2_control.xacro"/>
+  <xacro:kid_dynamixel_ros2_control
+    port="$(arg port)" baud="$(arg baud)" rw_rate="$(arg rw_rate)"/>
+
+</robot>

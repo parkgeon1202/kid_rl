@@ -1,0 +1,264 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <!-- Include this macro from the robot URDF.
+
+       모터 모델은 학습 모델(mjlab kid_RL.xml)의 액추에이터 클래스와 대응한다:
+         kp 27  = MX-28   (neck/어깨/팔꿈치/손목, head_pitch 제외)
+         2026-10-12 실험: 팔 10개(어깨 3축/팔꿈치/손목)만 27 -> 120(head_pitch 와 같은 값). 학습 kp_fw 는 27 그대로라
+         sim 과 다르다. 팔꿈치 추종 오차(0.24 rad) 확인용이며 되돌릴 때는 27.
+         kp 46  = MX-64   (torso_yaw, 좌우 hip_yaw 3개). 2026-10-13 에 150 으로 올렸다가 2026-10-14 에
+                  46 으로 되돌렸다: 기존 모델(sim kp_fw 25 로 학습)을 IMU 부호 수정 후 다시 시험하기 위해서다.
+                  sim kp_fw 167 로 학습한 모델을 올릴 때는 150 으로 바꿀 것(같은 PWM: 실기 x 141.32 / 127).
+         kp 102 = MX-106  (좌우 hip_roll_crank, ankle_roll_crank 4개)
+         kp 149 = XH540   (좌우 hip/knee/ankle pitch 6개)
+       2026-10-05: 다리 12개만 1.2 배(55/122/179)로 실기 시험했다가 되돌림.
+       2026-10-07: MX-64 만 학습 kp_fw(25)와 숫자가 다르다. 의도된 차이다. 학습 쪽 25 는
+         "펌웨어 46 인 실기 MX-64" 를 흉내 내도록 공중 로그(air1005.csv)에 맞춘 값이므로
+         여기 값은 46 으로 둔다. 여기를 25 로 낮추면 실기가 sim 보다 더 물러진다.
+       2026-09-30: 35/60/134/165 -> 27/46/102/149 (학습 kid_rl_dance_constants.py kp_fw 와 같게,
+       처음 식별 값으로 되돌림). 이 값으로 학습한 모델과 함께 배포할 것. 이전 모델은 옛 값으로 학습됐다.
+       microban(XL330 19개, ID 11~51)과는 다른 로봇이다. 예전 주석이 microban을
+       가리키고 있었으나 ID도 모델도 일치하지 않는다.
+
+       baud: 1 Mbps (2026-09-23 에 3 Mbps 에서 낮춤).
+       25축 Sync Read+Write 가 ~700 바이트라 8N1 기준 1 Mbps 에서 7.0 ms,
+       3 Mbps 에서 2.34 ms 다. 50 Hz 예산 20 ms 안에 둘 다 들어간다.
+       주의: 낮춘 이유가 패킷 손실 때문이라고 적어 두었었으나 그건 틀렸다.
+       1 Mbps 로 내린 뒤 실측해도 읽기 정체 17.6% -> 14.3% 로 거의 그대로였다.
+       같은 25축을 4.5 Mbps 로 손실 없이 돌리는 구현도 있다
+       (colcon_ws, config/irc.yaml). 즉 1 Mbps 는 여유를 둔 보수적 선택일 뿐이고,
+       통신 문제의 원인과도 해결과도 무관하다.
+       2026-09-23 의 폭주 두 건은 실행 '도중에' 실패율이 11%->45%, 2%->100% 로
+       계속 올라가는 형태였다. 보율이나 버스 타이밍 문제라면 실패율이 일정해야
+       한다. 점점 나빠지는 것은 공급 전압 쪽 신호다 — 같은 구간에서 Input Voltage
+       Error 가 쏟아졌고, 마지막에는 25개가 동시에 무응답이 되었는데 그때 커널에는
+       USB/시리얼 이벤트가 전혀 없었다(호스트는 멀쩡, 서보가 죽은 것).
+       서보 EEPROM 의 Baud Rate 레지스터도 같은 값으로 맞춰야 통신이 된다.
+       See docs/THREADING.md section 4 for the full budget.
+
+       rw_rate: capped at the controller_manager update_rate by the
+       ResourceManager, so it can only decimate, never speed up. Leaving it equal
+       to update_rate means "read and write every controller tick".
+
+       is_async="true" moves the serial transaction to its own thread. It costs
+       one cycle of latency, so only turn it on after measuring an overrun. -->
+  <!-- SyncRead 서보별 응답 추적 스위치. 진단할 때만 true 로 바꾼다.
+       true 면: 드라이버가 SyncReadRxTracker(dynamixel/sync_read_rx_tracker.cpp)로
+       수신해 실패 로그에 "missing IDs" 를 찍고, 관절마다 rx_missing_id 상태
+       인터페이스가 선언되며, kid_rl 은 그것을 보고 CSV 에 rx_missing_count /
+       rx_missing_ids 열을 스스로 추가한다.
+       false 면: 원래의 SDK 수신 경로 그대로이고 인터페이스도 열도 없다. -->
+  <!-- 2026-09-23: 켬. 어느 서보 응답이 빠지는지 CSV 의 rx_missing_ids 로 보려고. -->
+  <xacro:property name="track_rx" value="true"/>
+  <!-- 버스 타이밍 측정 스위치. true 면 드라이버가 dxl_bus gpio 로 SyncRead/SyncWrite
+       시간을 내보내고, kid_rl 은 그것을 보고 CSV 에 read_ms, read_ok,
+       joint_age_min_ms, joint_age_max_ms, prev_write_sent, prev_write_ms,
+       prev_write_drain_ms 열을 스스로 추가한다. 비용은 매 틱 시계 읽기 네 번이다. -->
+  <xacro:property name="bus_timing" value="true"/>
+  <!-- 켜면 매 SyncWrite 뒤 tcdrain() 으로 송신 큐가 빌 때까지 제어 스레드가 기다리고,
+       그 시간을 prev_write_drain_ms 에 남긴다. 제어 루프를 수 ms 막고, 커널이 USB
+       시리얼의 송신 완료를 커널 틱 간격으로 확인해서 값이 그 단위로 부풀 수 있다.
+       측정할 때만 true 로 바꾼다. 꺼 두면 그 열은 -1 이다. -->
+  <xacro:property name="measure_write_drain" value="false"/>
+
+  <xacro:macro name="kid_dynamixel_ros2_control" params="name:=KidDynamixel port:=/dev/ttyUSB-U2D2 baud:=1000000 rw_rate:=50">
+    <ros2_control name="${name}" type="system" rw_rate="${rw_rate}">
+      <hardware>
+        <plugin>dynamixel_hardware_interface/DynamixelHardware</plugin>
+        <param name="port_name">${port}</param>
+        <param name="baud_rate">${baud}</param>
+        <param name="number_of_joints">25</param>
+        <param name="number_of_transmissions">25</param>
+        <param name="dynamixel_model_folder">/param/dxl_model</param>
+        <!-- 두 가지 용도를 겸하는 값이다.
+             (1) 런타임 허용치: 400ms = 50Hz에서 연속 20틱 실패하면 read() 가
+                 ERROR 를 반환한다.
+             (2) on_activate 의 첫 sync read 성공까지 허용되는 전체 예산
+                 (dynamixel_hardware_interface.cpp:554-567). Fast Sync Read 가
+                 응답하지 않는 펌웨어면 일반 SyncRead 로 넘어가는 데 10회 시도
+                 (~340ms)가 필요해서 100ms 로는 기동 자체가 실패한다.
+             그래서 400ms. 단, 그만큼 오래된 관절값이 정책에 들어갈 수 있다. -->
+        <param name="error_timeout_ms">400</param>
+        <param name="disable_torque_at_init">true</param>
+        <!-- Fast Sync Read 끔. 이 방식은 25개 응답을 한 패킷으로 받아서 하나만
+             늦거나 깨져도 사이클 전체가 실패한다(-3001 타임아웃 / -3002 손상).
+             드라이버는 한 번 성공하면 fast_read_permanent_ 를 세워 이후 실패해도
+             일반 SyncRead 로 되돌아가지 않으므로, 기동 때 성공하면 부하가 걸린
+             뒤에도 계속 Fast 로 고집한다.
+             비교: 같은 로봇에서 문제없이 쓰던 colcon_ws 쪽 드라이버에는 Fast
+             경로 자체가 없다(일반 SyncRead 전용). -->
+        <param name="use_fast_read_protocol">false</param>
+        <!-- 값은 파일 위쪽의 track_rx 프로퍼티에서 정한다. -->
+        <param name="track_sync_read_rx">${'true' if track_rx else 'false'}</param>
+        <param name="measure_write_drain">${'true' if measure_write_drain else 'false'}</param>
+        <!-- A. 제어 루프 SyncRead 응답 대기 제한 [ms] (2026-09-23).
+             예전에는 제어 주기(20 ms)를 통째로 기다려서, 응답 하나만 빠져도 사이클이
+             주기를 넘기고 ros2_control 이 다음 칸 하나를 건너뛰었다.
+             근거(22:06 실행 CSV, 성공한 읽기 6,452틱): read_ms 중앙 8.4, p99.9 11.1,
+             최대 12.25 ms. 최대치보다 여유 있게 14. 실패해도 14 + (update+write 최대
+             3.98 ms) = 약 18 ms 로 20 ms 안에 끝난다. 보율·서보 수·읽는 항목을 바꾸면
+             read_ms 를 다시 보고 맞출 것. 0 이면 예전처럼 주기 전체를 쓴다. -->
+        <param name="read_timeout_ms">14</param>
+        <!-- B. read 가 통신 실패여도 이번 틱 명령을 보낸다 (2026-09-23).
+             예전에는 read 실패 시 write 가 전송을 건너뛰어, 주기 초과와 겹쳐 새 명령이
+             약 60 ms 동안 나가지 않았다. 이번 틱 정책은 직전 관절값으로 계산되는데,
+             학습 관측 지연(0~1 스텝)이 딱 이 경우를 덮는다. -->
+        <param name="write_on_read_failure">true</param>
+      </hardware>
+
+      <xacro:macro name="kid_joint" params="joint id kp sign:=1.0">
+        <joint name="${joint}">
+          <command_interface name="position"/>
+          <state_interface name="position"/>
+          <state_interface name="velocity"/>
+          <!-- effort 는 뺐다. HW_IF_EFFORT 는 Present Current/Present Load 에서
+               오는데(dynamixel_hardware_interface.hpp:406-410), MX-28 에는
+               Present Current 가 없어서 아래 gpio 에서도 읽지 않는다.
+               소스 없이 선언하면 0.0 이 그대로 퍼블리시된다. -->
+          <!-- 주의: 이름과 달리 관절별 고장 상태가 아니다.
+               CheckError() 는 이 인터페이스에 서보별 Hardware Error Status 바이트가
+               아니라 버스 전체의 집계값 error_state 를 넣는다
+               (dynamixel_hardware_interface.cpp:889-895). 25개 열이 항상 같은 값이다.
+               게다가 그 error_state 는 입력 전압 비트(bit 0)를 마스킹해서 빼므로
+               (dynamixel.hpp:89 kInputVoltageErrorMask), 전압 이상은 여기에 절대
+               나타나지 않는다. 서보별 진단이 필요하면 gpio 쪽
+               Hardware Error Status 를 직접 봐야 한다. -->
+          <state_interface name="hardware_state"/>
+          <!-- 이 틱의 SyncRead 에서 이 서보 응답이 빠졌으면 서보 ID, 받았으면 -1. -->
+          <xacro:if value="${track_rx}">
+            <state_interface name="rx_missing_id"/>
+          </xacro:if>
+        </joint>
+        <gpio name="${joint}_dxl">
+          <param name="type">dxl</param>
+          <param name="ID">${id}</param>
+          <command_interface name="Goal Position"/>
+          <state_interface name="Present Position"/>
+          <state_interface name="Present Velocity"/>
+          <!-- Present Current 는 MX-28 컨트롤 테이블에 없다(126번지가 Present
+               Load 다). 25개 전부에 선언하면 SetDxlReadItems 가
+               CANNOT_FIND_CONTROL_ITEM 을 반환해 MX-28 12개에서 on_init 이
+               실패한다(dynamixel.cpp:425-431). 전류 감시가 필요해지면 MX-28 만
+               Present Load 로 갈라 쓰되 단위가 다르다는 점에 주의할 것. -->
+          <!-- 서보 자체 고장(과부하/과열/전압/엔코더)을 읽는 유일한 경로.
+               CheckError() 의 해독기는 이 state_interface 가 선언된 ID 에 대해서만
+               동작한다(dynamixel_hardware_interface.cpp:1057,1098). 선언하지 않으면
+               기능이 꺼지는 게 아니라 아예 없는 것과 같고, dxl_state 토픽의
+               dxl_hw_state 도 영원히 0 이다. 네 모델(MX-28/64/106, XH540) 모두
+               이 두 항목을 가지고 있는 것을 확인했다. -->
+          <state_interface name="Hardware Error Status"/>
+          <!-- 서보가 스스로 Overheating Error 를 내면 Shutdown 이 걸리고, 그 뒤엔
+               REBOOT 없이는 토크를 다시 켤 수 없다. 그 전에 잡으려면 온도를 봐야 한다. -->
+          <state_interface name="Present Temperature"/>
+          <!-- 2026-10-13 진단용: 걷는 중 전원 전압 강하와 펌웨어가 실제로 내는 PWM 을 CSV
+               (vin_<관절>, duty_<관절>)에 남긴다. 컨트롤러의 MotorTelemetryMonitor 가 읽는다.
+               25개 전부에 선언해야 한다: 서보마다 읽기 항목이 다르면 드라이버가 Sync Read 를
+               버리고 Bulk Read 로 바뀐다(dynamixel.cpp checkReadType). 네 모델 모두 두 항목을
+               가지고 있다(124, 144번지). 비용은 서보당 4 바이트, 사이클당 약 1 ms.
+               필요 없어지면 이 두 줄만 지우면 컨트롤러 쪽은 스스로 꺼진다. -->
+          <state_interface name="Present Input Voltage"/>
+          <state_interface name="Present PWM"/>
+          <!-- Firmware P-gain matching the trained BamActuatorCfg kp_fw.
+               BAM uses duty = dq * kp * error_gain; the MX(2.0) models use
+               their own error_gain, not the MX Protocol 1.0 value 0.158.
+               The head_pitch exception below is intentionally different. -->
+          <param name="Position P Gain">${kp}</param>
+          <!-- 10 틱 = 20 us. 0 이 아니라는 점이 중요하다.
+               공장 기본값 250(=500 us)은 25개를 곱하면 사이클당 12.5 ms 라 확실히
+               너무 크다. 그렇다고 0 으로 두면 반이중(half-duplex, 신호선 하나를
+               송신과 수신이 번갈아 쓰는 방식) 버스에서 앞 서보가 선을 놓는 순간
+               다음 서보가 곧바로 송신을 시작한다. 트랜시버(transceiver, 송수신
+               방향을 바꿔 주는 소자)의 방향 전환이 끝나기 전에 데이터가 실리면
+               응답 앞부분 바이트가 깨진다.
+               Sync Read 는 25개 응답을 순서대로 이어받는 구조라 그중 하나만 깨져도
+               사이클 전체가 -3001(수신 타임아웃)로 실패하고, 실패할 때마다 타임아웃
+               20 ms 를 통째로 태운다.
+               근거: 같은 25축을 4.5 Mbps 로, 서보당 20 바이트씩(우리의 2배) 읽으면서
+               손실이 없는 colcon_ws 쪽 구현이 이 값을 일부러 20 us 로 강제한다
+               (dynamixel_hardware_interface.cpp:21-26 의
+                TARGET_RETURN_DELAY_TIME_US = 20).
+               비용은 20 us x 25 = 0.5 ms 로 20 ms 예산에서 무시할 수준이다.
+
+               정직하게: 이 변경으로 측정 가능한 개선이 확인된 적은 없다.
+               2026-09-23 에 이걸 고치고 읽기 정체가 14.3% -> 1.3% 로 떨어졌지만,
+               CSV 28개 전수 조사 결과 RDT=0 이던 이전 27회 실행의 중앙값이 이미
+               1.0% 였다. 즉 1.3% 는 개선이 아니라 평소로 돌아온 것이고, RDT=0 으로
+               27번 멀쩡히 돌았으므로 RDT 는 그 두 번의 폭주 원인이 아니었다.
+               이 값은 '레퍼런스 구현과 맞추고 0 의 이론적 위험을 없애는' 보수적
+               선택으로만 유지한다. 통신 문제를 여기서 찾지 말 것. -->
+          <param name="Return Delay Time">10</param>
+          <param name="Drive Mode">${0 if sign > 0 else 1}</param>
+          <!-- 3 = Position Control. 이전 세션에서 속도/전류/PWM 모드로 남아 있으면
+               Goal Position 쓰기가 조용히 다른 의미가 된다. 이 항목만 가장 먼저,
+               토크 off 상태에서 쓰인다(dynamixel_hardware_interface.cpp:971-986). -->
+          <param name="Operating Mode">3</param>
+          <!-- 0 = 프로파일 없음. 200Hz 로 목표각을 흘려보내는 방식이라 서보가
+               내부 사다리꼴 프로파일로 다시 다듬으면 학습 때와 다른 동특성이 된다.
+               RAM 값이라 이전 세션 값이 남아 있을 수 있어 매번 명시한다. -->
+          <param name="Profile Velocity">0</param>
+          <param name="Profile Acceleration">0</param>
+          <!-- 학습은 P 게인만 있는 모델(kv=0, I=0)이었다. RAM 값이므로 이전 세션에
+               0이 아닌 값이 남아 있으면 플랜트가 조용히 달라진다. -->
+          <param name="Position I Gain">0</param>
+          <param name="Position D Gain">0</param>
+        </gpio>
+        <transmission name="${joint}_transmission">
+          <plugin>transmission_interface/SimpleTransmission</plugin>
+          <joint name="${joint}" role="joint1">
+            <mechanical_reduction>1.0</mechanical_reduction>
+          </joint>
+          <actuator name="${joint}_dxl" role="actuator1">
+            <mechanical_reduction>1.0</mechanical_reduction>
+          </actuator>
+        </transmission>
+      </xacro:macro>
+
+      <xacro:kid_joint joint="torso_yaw" id="22" kp="46" sign="1"/>
+      <xacro:kid_joint joint="neck_yaw" id="23" kp="27" sign="1"/>
+      <!-- head_pitch 만 학습값 35 대신 120. 실기에서 낮은 게인일 때 머리가
+           중력에 눌려 0.54 rad 처진 채로 버티지 못했다(당시 kp=27 인 다른 MX-28
+           관절들은 오차 0.1 rad 이내, 추종 기울기 -0.115 로 목표를 거의 못 따라감).
+           머리는 보행 동역학에 거의 기여하지 않으므로 플랜트 차이보다 처짐을
+           없애는 쪽이 낫다. 다리 관절에는 같은 논리를 적용하지 말 것. -->
+      <xacro:kid_joint joint="head_pitch" id="24" kp="120" sign="1"/>
+      <xacro:kid_joint joint="left_shoulder_yaw" id="4" kp="120" sign="1"/>
+      <xacro:kid_joint joint="left_wrist_pitch" id="8" kp="120" sign="1"/>
+      <xacro:kid_joint joint="right_shoulder_yaw" id="5" kp="120" sign="1"/>
+      <xacro:kid_joint joint="right_wrist_pitch" id="9" kp="120" sign="1"/>
+
+      <xacro:kid_joint joint="right_shoulder_pitch" id="1" kp="120" sign="1"/>
+      <xacro:kid_joint joint="right_shoulder_roll" id="3" kp="120" sign="1"/>
+      <xacro:kid_joint joint="right_elbow_pitch" id="7" kp="120" sign="1"/>
+      <xacro:kid_joint joint="right_hip_yaw" id="13" kp="46" sign="1"/>
+      <xacro:kid_joint joint="right_hip_roll_crank" id="11" kp="102" sign="1"/>
+      <xacro:kid_joint joint="right_hip_pitch" id="15" kp="149" sign="1"/>
+      <xacro:kid_joint joint="right_knee_pitch" id="17" kp="149" sign="1"/>
+      <xacro:kid_joint joint="right_ankle_pitch" id="19" kp="149" sign="-1"/>
+      <xacro:kid_joint joint="right_ankle_roll_crank" id="21" kp="102" sign="1"/>
+      <xacro:kid_joint joint="left_shoulder_pitch" id="0" kp="120" sign="1"/>
+      <xacro:kid_joint joint="left_shoulder_roll" id="2" kp="120" sign="1"/>
+      <xacro:kid_joint joint="left_elbow_pitch" id="6" kp="120" sign="1"/>
+      <xacro:kid_joint joint="left_hip_yaw" id="12" kp="46" sign="1"/>
+      <xacro:kid_joint joint="left_hip_roll_crank" id="10" kp="102" sign="1"/>
+      <xacro:kid_joint joint="left_hip_pitch" id="14" kp="149" sign="1"/>
+      <xacro:kid_joint joint="left_knee_pitch" id="16" kp="149" sign="1"/>
+      <xacro:kid_joint joint="left_ankle_pitch" id="18" kp="149" sign="-1"/>
+      <xacro:kid_joint joint="left_ankle_roll_crank" id="20" kp="102" sign="1"/>
+      <xacro:if value="${bus_timing}">
+        <!-- 서보가 아니라 드라이버 자신의 측정값. ID 는 드라이버의 공통 gpio 검사를
+             통과하려고 넣은 자리표시자이고 쓰이지 않는다(ping 도 레지스터 쓰기도 안 함). -->
+        <gpio name="dxl_bus">
+          <param name="type">bus_timing</param>
+          <param name="ID">255</param>
+          <state_interface name="read_ms"/>
+          <state_interface name="read_ok"/>
+          <state_interface name="read_ok_start_s"/>
+          <state_interface name="read_ok_end_s"/>
+          <state_interface name="write_sent"/>
+          <state_interface name="write_ms"/>
+          <state_interface name="write_drain_ms"/>
+        </gpio>
+      </xacro:if>
+    </ros2_control>
+  </xacro:macro>
+</robot>

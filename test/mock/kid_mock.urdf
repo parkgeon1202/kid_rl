@@ -1,0 +1,145 @@
+<?xml version="1.0"?>
+<!--
+  Fake 18-DoF robot used to exercise kid_rl/KidRlController without hardware.
+  The kinematics are meaningless (one serial chain of revolute joints); only the
+  <ros2_control> block matters. mock_components/GenericSystem mirrors every
+  position command straight back into the position state, so /joint_states shows
+  exactly what the controller commanded.
+
+  See ../smoke_test.sh.
+-->
+<robot name="kid_mock">
+  <link name="base_link"/>
+  <link name="right_shoulder_pitch_link"/>
+  <joint name="right_shoulder_pitch" type="revolute"><parent link="base_link"/><child link="right_shoulder_pitch_link"/><axis xyz="0 0 1"/><limit lower="-3.14" upper="3.14" effort="10" velocity="10"/></joint>
+  <link name="right_shoulder_roll_link"/>
+  <joint name="right_shoulder_roll" type="revolute"><parent link="right_shoulder_pitch_link"/><child link="right_shoulder_roll_link"/><axis xyz="0 0 1"/><limit lower="-3.14" upper="3.14" effort="10" velocity="10"/></joint>
+  <link name="right_elbow_link"/>
+  <joint name="right_elbow" type="revolute"><parent link="right_shoulder_roll_link"/><child link="right_elbow_link"/><axis xyz="0 0 1"/><limit lower="-3.14" upper="3.14" effort="10" velocity="10"/></joint>
+  <link name="right_hip_yaw_link"/>
+  <joint name="right_hip_yaw" type="revolute"><parent link="right_elbow_link"/><child link="right_hip_yaw_link"/><axis xyz="0 0 1"/><limit lower="-3.14" upper="3.14" effort="10" velocity="10"/></joint>
+  <link name="right_hip_roll_link"/>
+  <joint name="right_hip_roll" type="revolute"><parent link="right_hip_yaw_link"/><child link="right_hip_roll_link"/><axis xyz="0 0 1"/><limit lower="-3.14" upper="3.14" effort="10" velocity="10"/></joint>
+  <link name="right_hip_pitch_link"/>
+  <joint name="right_hip_pitch" type="revolute"><parent link="right_hip_roll_link"/><child link="right_hip_pitch_link"/><axis xyz="0 0 1"/><limit lower="-3.14" upper="3.14" effort="10" velocity="10"/></joint>
+  <link name="right_knee_link"/>
+  <joint name="right_knee" type="revolute"><parent link="right_hip_pitch_link"/><child link="right_knee_link"/><axis xyz="0 0 1"/><limit lower="-3.14" upper="3.14" effort="10" velocity="10"/></joint>
+  <link name="right_ankle_pitch_link"/>
+  <joint name="right_ankle_pitch" type="revolute"><parent link="right_knee_link"/><child link="right_ankle_pitch_link"/><axis xyz="0 0 1"/><limit lower="-3.14" upper="3.14" effort="10" velocity="10"/></joint>
+  <link name="right_ankle_roll_link"/>
+  <joint name="right_ankle_roll" type="revolute"><parent link="right_ankle_pitch_link"/><child link="right_ankle_roll_link"/><axis xyz="0 0 1"/><limit lower="-3.14" upper="3.14" effort="10" velocity="10"/></joint>
+  <link name="left_shoulder_pitch_link"/>
+  <joint name="left_shoulder_pitch" type="revolute"><parent link="right_ankle_roll_link"/><child link="left_shoulder_pitch_link"/><axis xyz="0 0 1"/><limit lower="-3.14" upper="3.14" effort="10" velocity="10"/></joint>
+  <link name="left_shoulder_roll_link"/>
+  <joint name="left_shoulder_roll" type="revolute"><parent link="left_shoulder_pitch_link"/><child link="left_shoulder_roll_link"/><axis xyz="0 0 1"/><limit lower="-3.14" upper="3.14" effort="10" velocity="10"/></joint>
+  <link name="left_elbow_link"/>
+  <joint name="left_elbow" type="revolute"><parent link="left_shoulder_roll_link"/><child link="left_elbow_link"/><axis xyz="0 0 1"/><limit lower="-3.14" upper="3.14" effort="10" velocity="10"/></joint>
+  <link name="left_hip_yaw_link"/>
+  <joint name="left_hip_yaw" type="revolute"><parent link="left_elbow_link"/><child link="left_hip_yaw_link"/><axis xyz="0 0 1"/><limit lower="-3.14" upper="3.14" effort="10" velocity="10"/></joint>
+  <link name="left_hip_roll_link"/>
+  <joint name="left_hip_roll" type="revolute"><parent link="left_hip_yaw_link"/><child link="left_hip_roll_link"/><axis xyz="0 0 1"/><limit lower="-3.14" upper="3.14" effort="10" velocity="10"/></joint>
+  <link name="left_hip_pitch_link"/>
+  <joint name="left_hip_pitch" type="revolute"><parent link="left_hip_roll_link"/><child link="left_hip_pitch_link"/><axis xyz="0 0 1"/><limit lower="-3.14" upper="3.14" effort="10" velocity="10"/></joint>
+  <link name="left_knee_link"/>
+  <joint name="left_knee" type="revolute"><parent link="left_hip_pitch_link"/><child link="left_knee_link"/><axis xyz="0 0 1"/><limit lower="-3.14" upper="3.14" effort="10" velocity="10"/></joint>
+  <link name="left_ankle_pitch_link"/>
+  <joint name="left_ankle_pitch" type="revolute"><parent link="left_knee_link"/><child link="left_ankle_pitch_link"/><axis xyz="0 0 1"/><limit lower="-3.14" upper="3.14" effort="10" velocity="10"/></joint>
+  <link name="left_ankle_roll_link"/>
+  <joint name="left_ankle_roll" type="revolute"><parent link="left_ankle_pitch_link"/><child link="left_ankle_roll_link"/><axis xyz="0 0 1"/><limit lower="-3.14" upper="3.14" effort="10" velocity="10"/></joint>
+  <ros2_control name="KidMock" type="system">
+    <hardware>
+      <plugin>mock_components/GenericSystem</plugin>
+      <param name="calculate_dynamics">true</param>
+    </hardware>
+      <joint name="right_shoulder_pitch">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="right_shoulder_roll">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="right_elbow">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="right_hip_yaw">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="right_hip_roll">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="right_hip_pitch">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="right_knee">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="right_ankle_pitch">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="right_ankle_roll">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="left_shoulder_pitch">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="left_shoulder_roll">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="left_elbow">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="left_hip_yaw">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="left_hip_roll">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="left_hip_pitch">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="left_knee">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="left_ankle_pitch">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="left_ankle_roll">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+  </ros2_control>
+</robot>

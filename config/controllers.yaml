@@ -1,0 +1,401 @@
+controller_manager:
+  ros__parameters:
+    # ── 주기 ─────────────────────────────────────────────────────────────────
+    # DYNAMIXEL read/write 50 Hz, 정책 추론 50 Hz (decimation 1).
+    #
+    # 학습은 mjlab SIM_CFG timestep=0.005 에 decimation=4, 즉 정책이 50 Hz 다.
+    # 제어 틱을 50 Hz 로 두면 정책 주기와 1:1 이 되어 정책 관점에서는 학습과 같다.
+    # 200 Hz 로 돌리면 시뮬 물리 스텝과 1:1 이 되어 BAM 지연 모델(3~6 스텝)까지
+    # 그대로 대응하지만, 아래 실측 때문에 현재 하드웨어에서는 지킬 수 없다.
+    #
+    # 하드웨어 컴포넌트의 rw_rate는 이 update_rate를 절대 넘을 수 없다
+    # (resource_manager.cpp에서 min(rw_rate, update_rate)로 clamp된다).
+    #
+    # 실측(2026-09-21): read 10.3 ms, update 0.49 ms, write 0.14 ms.
+    # 산술적으로는 3 Mbps 에서 25축 Sync Read+Write 가 ~2.34 ms 여야 하지만,
+    # 실제로는 응답을 기다리다 타임아웃되는 경우가 많아 read 가 주기를 통째로
+    # 먹는다(부하가 걸릴수록 심해져 지연 틱이 6.6% -> 12.9%). 버스 쪽 전기적
+    # 문제를 해결하기 전까지는 주기를 늘려 감당한다.
+    # 100 -> 50 (2026-09-21). 실측 read 시간이 10.3 ms 라 100 Hz(예산 10 ms)에서는
+    # 읽기 하나가 예산을 통째로 먹고 8.6% 의 틱이 밀렸다. 50 Hz 면 예산이 20 ms 라
+    # 여유가 생기고, 버스 응답 대기 시간(setPacketTimeout = 주기)도 10 -> 20 ms 로
+    # 늘어 SyncRead 타임아웃(-3001)이 줄어든다.
+    # 부수 효과로 정책 주기(50 Hz)와 제어 주기가 1:1 이 되어 decimation 이 1 이 된다.
+    # 학습이 timestep 0.005 * decimation 4 = 50 Hz 였으므로 정책 관점에서는 동일하다.
+    # 다만 워치독과 낙상 판정 해상도가 10 -> 20 ms 로 거칠어지는 것은 감수한다.
+    update_rate: 50
+
+    # ── 실시간 스레드 ────────────────────────────────────────────────────────
+    # 아래 셋이 없으면 지터로 주기를 놓친다.
+    # thread_priority는 /etc/security/limits.conf의 rtprio 한도가 열려 있어야
+    # 실제로 적용된다. 안 되면 기동 로그에 다음이 찍힌다:
+    #   "Could not enable FIFO RT scheduling policy"
+    lock_memory: true          # mlockall: page fault로 인한 지연 제거
+    thread_priority: 80        # SCHED_FIFO 우선순위 (기본 50)
+    # RT 루프를 격리된 코어에 고정한다. 커널 부팅 인자 isolcpus=2,3 등과 함께 쓴다.
+    # 코어 번호는 장비마다 다르므로 확인 후 주석을 푼다.
+    # cpu_affinity: [2]
+
+    # 아래는 "어떤 플러그인을 로드할지"만 정한다. 컨트롤러별 update_rate /
+    # is_async / thread_priority는 controller_manager 하위가 아니라 컨트롤러
+    # 자신의 노드 파라미터이므로, 이 파일 아래쪽의 최상위 블록에 적어야 한다.
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    kid_rl:
+      type: kid_rl/KidRlController
+
+# /joint_states를 200 Hz로 뿌릴 이유가 없다. DDS와 executor 부담만 커진다.
+# update_rate는 controller_manager update_rate의 약수여야 경고가 안 뜬다 (50 % 50 == 0).
+joint_state_broadcaster:
+  ros__parameters:
+    update_rate: 50
+
+kid_rl:
+  ros__parameters:
+    # update_rate를 일부러 지정하지 않는다. 지정하지 않으면 controller_manager
+    # update_rate(50)를 그대로 상속한다.
+    # 정책 주기는 아래 policy_rate_hz로만 조절할 것.
+    # is_async: true 는 추론이 한 틱 예산을 못 지킬 때의 마지막 수단이다.
+    # docs/THREADING.md 3.2절 참고.
+
+    # 학습 관절 순서 그대로. mjlab이 DOFS_FILTER로 8개 passive linkage
+    # (*_roll_cap, *_roll_actual)를 걸러낸 뒤 MJCF 선언 순서로 정렬한 결과이고,
+    # ONNX 메타데이터 joint_names에서 같은 필터를 적용한 것과 일치한다.
+    # action(25) 순서도 동일하다. 순서를 바꾸면 정책이 조용히 오작동한다.
+    joints:
+      - torso_yaw
+      - neck_yaw
+      - head_pitch
+      - left_shoulder_pitch
+      - left_shoulder_roll
+      - left_shoulder_yaw
+      - left_elbow_pitch
+      - left_wrist_pitch
+      - right_shoulder_pitch
+      - right_shoulder_roll
+      - right_shoulder_yaw
+      - right_elbow_pitch
+      - right_wrist_pitch
+      - left_hip_yaw
+      - left_hip_roll_crank
+      - left_hip_pitch
+      - left_knee_pitch
+      - left_ankle_pitch
+      - left_ankle_roll_crank
+      - right_hip_yaw
+      - right_hip_roll_crank
+      - right_hip_pitch
+      - right_knee_pitch
+      - right_ankle_pitch
+      - right_ankle_roll_crank
+    # mjlab HOME_KEYFRAME. 반올림된 ONNX 메타데이터(1e-3) 대신
+    # math.radians(15) / math.radians(30) 원본값을 쓴다.
+    default_positions:
+      - 0.0                    # torso_yaw
+      - 0.0                    # neck_yaw
+      - 0.0                    # head_pitch
+      - 0.0                    # left_shoulder_pitch
+      - 0.0                    # left_shoulder_roll
+      - 0.0                    # left_shoulder_yaw
+      - -2.2689280275926285    # left_elbow_pitch  (-130deg, arms folded)
+      - 0.0                    # left_wrist_pitch
+      - 0.0                    # right_shoulder_pitch
+      - 0.0                    # right_shoulder_roll
+      - 0.0                    # right_shoulder_yaw
+      - 2.2689280275926285     # right_elbow_pitch (+130deg, arms folded)
+      - 0.0                    # right_wrist_pitch
+      - 0.0                    # left_hip_yaw
+      - 0.0                    # left_hip_roll_crank
+      - -0.2617993877991494    # left_hip_pitch
+      - 0.5235987755982988     # left_knee_pitch
+      - -0.2617993877991494    # left_ankle_pitch
+      - 0.0                    # left_ankle_roll_crank
+      - 0.0                    # right_hip_yaw
+      - 0.0                    # right_hip_roll_crank
+      - 0.2617993877991494     # right_hip_pitch
+      - -0.5235987755982988    # right_knee_pitch
+      - 0.2617993877991494     # right_ankle_pitch
+      - 0.0                    # right_ankle_roll_crank
+    # MJCF jnt_range. 정책이 학습된 범위와 같다. 실기 DYNAMIXEL 가동범위를
+    # 측정해 더 좁힐 수는 있어도 넓히면 안 된다.
+    joint_position_min:
+      - -3.142                 # torso_yaw
+      - -3.14159               # neck_yaw
+      - -1.5                   # head_pitch
+      - -3.14159               # left_shoulder_pitch
+      - -1.138                 # left_shoulder_roll
+      - -3.14159               # left_shoulder_yaw
+      - -2.443461              # left_elbow_pitch  (-140deg fold limit)
+      - -1.34                  # left_wrist_pitch
+      - -3.14159               # right_shoulder_pitch
+      - -1.5                   # right_shoulder_roll
+      - -3.14159               # right_shoulder_yaw
+      - -2.496                 # right_elbow_pitch
+      - -1.34                  # right_wrist_pitch
+      - -3.142                 # left_hip_yaw
+      - -1.186824              # left_hip_roll_crank
+      - -2.021                 # left_hip_pitch
+      - -1.594                 # left_knee_pitch
+      - -1.715                 # left_ankle_pitch
+      - -1.047198              # left_ankle_roll_crank
+      - -3.142                 # right_hip_yaw
+      - -1.186824              # right_hip_roll_crank
+      - -1.036                 # right_hip_pitch
+      - -1.57                  # right_knee_pitch
+      - -0.934                 # right_ankle_pitch
+      - -1.047198              # right_ankle_roll_crank
+    # 상한 3.14005 (torso_yaw, 좌우 hip_yaw): Goal Position 변환은
+    #   tick = (rad + 3.14159265359) / 0.0015339807878856412
+    # 이고 클램프가 없다(dynamixel_info.hpp:128-143). 3.142 rad 는 틱 4096 이
+    # 되어 0..4095 를 벗어나고, Sync Write 는 상태 패킷이 없으므로 그 명령은
+    # 조용히 버려진다. 4095 틱 = 3.14005867 rad 이 실제 최댓값이다.
+    # description/kid_rl.urdf.xacro 의 <limit upper> 와 같이 유지할 것.
+    joint_position_max:
+      - 3.14005                # torso_yaw
+      - 3.14159                # neck_yaw
+      - 1.57                   # head_pitch
+      - 3.14159                # left_shoulder_pitch
+      - 1.5                    # left_shoulder_roll
+      - 3.14159                # left_shoulder_yaw
+      - 2.089                  # left_elbow_pitch
+      - 0.119                  # left_wrist_pitch
+      - 3.14159                # right_shoulder_pitch
+      - 1.138                  # right_shoulder_roll
+      - 3.14159                # right_shoulder_yaw
+      - 2.443461               # right_elbow_pitch (+140deg fold limit)
+      - 0.119                  # right_wrist_pitch
+      - 3.14005                # left_hip_yaw
+      - 1.186824               # left_hip_roll_crank
+      - 1.036                  # left_hip_pitch
+      - 1.57                   # left_knee_pitch
+      - 0.934                  # left_ankle_pitch
+      - 1.396263               # left_ankle_roll_crank
+      - 3.14005                # right_hip_yaw
+      - 1.186824               # right_hip_roll_crank
+      - 2.021                  # right_hip_pitch
+      - 1.594                  # right_knee_pitch
+      - 1.715                  # right_ankle_pitch
+      - 1.396263               # right_ankle_roll_crank
+
+    # 정책 추론 주기. controller_manager update_rate 이하여야 한다.
+    policy_rate_hz: 50.0
+    # 기동 시 측정 자세 -> default_positions 보간 시간 [s].
+    ready_pose_duration_s: 2.0
+    # 이 시간 넘게 cmd_vel이 없으면 fault가 아니라 "속도 명령 0"으로 취급한다.
+    command_timeout_s: 0.25
+    # 이 시간 넘게 IMU가 없으면 POLICY_RUNNING에서 FAULT로 간다.
+    imu_timeout_s: 0.10
+
+    # ── 직접 입력 장치 (ROS topic을 사용하지 않음) ─────────────────────────
+    gamepad.enabled: true
+    # 비워 두면 VID/PID를 먼저 찾고, 실패하면 name_hint로 /dev/input/event*를 찾는다.
+    gamepad.device_path: ""
+    gamepad.name_hint: "Gulikit X"
+    gamepad.vendor_id: 1118      # 0x045e
+    gamepad.product_id: 654      # 0x028e
+    # 스틱 위치를 그대로 속도 명령으로 쓴다: cmd = 정규화된 축 [-1, 1] * max.
+    # 끝까지 밀면 max 값, 놓으면 바로 0. |축| < deadband 는 0 (중립 떨림 제거).
+    # (2026-10-04 이전에는 cmd += stick * step 으로 누적하는 방식이었다.)
+    gamepad.max_vx: 0.4
+    gamepad.max_vy: 0.3
+    gamepad.max_wz: 0.7
+    gamepad.deadband_vx: 0.1
+    gamepad.deadband_vy: 0.1
+    gamepad.deadband_wz: 0.1
+
+    # false 면 IMU 스레드를 아예 띄우지 않고(kid_rl_controller.cpp:377),
+    # 컨트롤러는 초기값 valid=false 를 계속 읽는다. 그 결과 SAFE_HOLD 에서
+    # "IMU 가 stale 하거나 invalid" 경고만 반복하며 POLICY_RUNNING 으로 넘어가지
+    # 않는다. 정책을 돌리려면 반드시 true 여야 한다.
+    # 켜기 전에 확인할 것: imu.port 심볼릭 링크가 실제로 존재하는지,
+    # imu.format 이 장치의 실제 출력과 맞는지(형식이 다르면 파싱이 실패해서
+    # valid 가 계속 false 로 남고 증상이 똑같다).
+    imu.enabled: true
+    imu.port: "/dev/ttyUSB-EBIMU"
+    imu.baudrate: 115200
+    # *roll,pitch,yaw,gx,gy,gz 또는 *qw,qx,qy,qz,gx,gy,gz
+    # 이 로봇의 EBIMU 는 쿼터니언 출력이다. 같은 장치를 읽는 ebimu 패키지가
+    # "*" 뒤에 실수 10개(쿼터니언 4 + 각속도 3 + 가속도 3)를 읽고 있다
+    # (ebimu/src/e2box_imu_node/e2box_imu_node.cpp:150-153).
+    # euler_gyro 로 두면 쿼터니언 앞 3개를 roll/pitch/yaw 로 읽어서
+    # 오류 없이 완전히 틀린 자세가 들어간다.
+    imu.format: "quaternion_gyro"
+    # 기본 EBIMU degree, degree/s 출력을 rad, rad/s로 바꾸는 계수.
+    imu.angle_scale: 0.017453292519943295
+    imu.gyro_scale: 0.017453292519943295
+    # 센서 축 -> ROS 몸통 축. "x,y,z" 는 그대로, "-y,x,z" 는 부호와 순서를 바꾼다.
+    # 로봇을 똑바로 세웠을 때 로그의 body 중력이 [0, 0, -1] 에 가까워야 한다.
+    # 실측(2026-09-20): sensor=[+0.011 +0.120 -0.993] 이므로 센서 +Z 가 위를 향한다.
+    # 그래서 z 는 그대로 두어야 한다(예전 하드코딩은 z 를 뒤집어 "뒤집힘"으로 오판했다).
+    # x/y 대응은 로봇을 앞으로 기울여 확인할 것: 앞으로 숙이면 body 중력의 x 가
+    # 커져야 한다(30도면 +0.5 근처). 반대로 커지면 부호를, 엉뚱한 축이 커지면
+    # 순서를 바꾼다. 이 값은 재빌드 없이 런치만 다시 하면 적용된다.
+    # 실측(2026-09-21): 앞으로 30도 숙이면 센서 y 가 - 방향으로 커졌다.
+    # 즉 센서 -Y 가 로봇 앞쪽이고, IMU 가 수직축 기준 90도 돌아가 장착돼 있다.
+    #   body_x = -sensor_y,  body_y = +sensor_x,  body_z = +sensor_z
+    # 이 매핑이면 30도 숙임에서 body x 가 +0.48 로 나온다(이론값 +0.5).
+    # 2026-10-13: body_y 부호를 뒤집었다("-y,x,z" -> "-y,-x,z"). 위 09-21 실측은 앞으로 숙이는
+    # 시험뿐이라 x 만 확인됐고, y(좌우 기울기)는 한 번도 물리적으로 확인된 적이 없었다.
+    # 근거(모두 기존 로그):
+    #   - 가만히 있고 IMU roll 이 5도 넘는 69개 순간(10-05~10-13, 5일치) 전부에서, 기록된 roll 로는
+    #     두 발의 높이가 중앙값 56 mm 어긋나 바닥에 설 수 없고, roll 부호를 뒤집으면 2.7 mm 로 맞는다
+    #     (10 mm 안에 드는 비율 0% -> 99%). pitch 는 다리 관절과 기울기 +1.09, 상관 0.99 로 맞다.
+    #   - 실기의 action 을 sim 에 그대로 넣으면 sim 몸통 roll 이 실기 기록과 크기는 같고 부호만
+    #     반대다(상관 -0.99, 기울기 -0.95).
+    #   - sim 에서 정책에 들어가는 IMU 를 y 거울상으로 바꾸면 실기처럼 첫 걸음에 옆으로 넘어진다.
+    # 확인 방법: 로봇을 왼쪽으로(왼쪽 옆구리가 내려가게) 30도 기울이면 로그의 body 중력 y 가
+    # +0.5 근처여야 한다. 음수로 나오면 이 줄이 틀린 것이다.
+    # 2026-10-14: 비교 시험을 위해 예전 값("-y,x,z", roll 부호가 뒤집힌 상태)으로 되돌려 둔다.
+    # 위 근거에 따른 수정값은 "-y,-x,z" 다.
+    imu.axis_map: "-y,x,z"
+    # 자이로 전용 매핑. 보통은 자세와 같아야 하지만, 이 EBIMU 는 두 신호의 좌표
+    # 규약이 다르다. 실측 로그로 확인했다(2026-09-21, 37초 주행 3781 샘플).
+    #
+    # 검증 방법: 몸통 좌표계에서 중력 벡터는 물리적으로  ġ = -ω × g  를 따른다.
+    # 기록된 중력을 수치 미분한 값과, 기록된 자이로로 계산한 -ω × g 를 비교해
+    # 모든 축 순열/부호 48가지 중 잔차가 가장 작은 것을 골랐다.
+    #   자세와 같은 매핑    : 잔차 0.927  (1.0 = 설명력 없음)
+    #   여기 적은 매핑      : 잔차 0.278, 축별 기울기 0.93 / 0.88 / 0.95
+    # 지연을 -3~+3 샘플까지 훑어도 0 샘플에서 최적이라 타이밍 문제가 아니다.
+    #
+    # 이 값이 틀리면 서 있을 때는 자이로가 0이라 아무 증상이 없고, 걷기 시작해
+    # 몸이 흔들릴 때만 정책이 흔들림을 반대로 읽어 발산한다. 증상이 "걸으면
+    # 넘어진다"로만 보여서 원인 찾기가 가장 어려운 부류다.
+    # 2026-10-13: "y,x,-z" -> "-y,x,z". 위 검증은 '기록된 중력'과 맞는 매핑을 고른 것이라, 중력의
+    # y 가 뒤집혀 있던 동안에는 자이로도 그 거울상(x, z 부호 반전)으로 맞춰져 있었다. 중력을
+    # 바로잡았으므로 자이로 x, z 도 같이 뒤집는다. 이제 자세 매핑과 같은 90도 회전이다
+    # (body_x = -sensor_y, body_y = +sensor_x, body_z = +sensor_z).
+    # 확인 방법: 위에서 봤을 때 반시계(왼쪽)로 돌리면 gyro z 가 +, 왼쪽 옆구리를 내리면 gyro x 가 -.
+    # 2026-10-14: 비교 시험을 위해 예전 값("y,x,-z")으로 되돌려 둔다. 수정값은 "-y,x,z" 다.
+    # 자세 매핑과 반드시 짝으로 바꿀 것(한쪽만 바꾸면 중력과 자이로가 서로 어긋난다).
+    imu.gyro_axis_map: "y,x,-z"
+    # target = default + action_scale * action
+    # 액션 클리핑은 하지 않는다. 학습 쪽에 클리핑이 없기 때문이다
+    # (params/env.yaml: actions.joint_pos.clip = null,
+    #  params/agent.yaml: clip_actions = null). 배포에서만 자르면 정책이
+    # 요구하지 않은 자세를 명령하게 된다. 정책 target에는 관절 위치 한계만 적용한다.
+    # 1.0 -> 0.5 (2026-09-21). 학습값은 0.5 다:
+    #   mjlab_kid_rl/tasks/kid_RL_env_cfg.py 의 joint_pos_action.scale = 0.5
+    #   models/policy.onnx 메타데이터 action_scale = 0.5
+    # 1.0 이면 정책이 의도한 관절 변위의 두 배를 명령한다. 실기에서 이 상태로
+    # 돌려 정책이 발산했다(목표 진폭 2.4~4.4 rad, |action| 최대 9.35).
+    # 이제 PolicyRunner::load() 가 기동 시 메타데이터와 대조해 어긋나면 막는다.
+    action_scale: 0.5
+    # 학습의 agent.clip_actions 와 같아야 한다(mjlab_kid_RL kid_RL_env_cfg.py,
+    # 2026-09-21 부터 5.0). 정책 출력을 ±action_clip 으로 자른 뒤 목표각을 만들고,
+    # 자른 값을 다음 관측의 last_action 으로 넣는다. 학습 래퍼가 그렇게 했기 때문이다.
+    # 이게 없던 2026-09-23 22:06 실기에서 |action| 9.75 가 되먹임되며 0.8 초 만에
+    # NaN 까지 발산했다. 학습 설정의 clip_actions 를 바꾸면 여기도 같이 바꿀 것.
+    # 0 이면 끈다.
+    # 2026-09-30: 학습에서 clip_actions 를 없앤 모델부터 0 (자르지 않음). 옛 모델(clip 5.0 으로
+    # 학습)을 다시 돌릴 때는 5.0 으로 되돌릴 것 -- last_action 관측이 학습과 같아야 한다.
+    action_clip: 0.0
+    # gyro 관측 1차 저역통과 컷오프 [Hz], 0 이면 끈다 (include/kid_rl/lowpass.hpp).
+    # 2026-09-28: 실기에서 정책 -> 다리 -> 몸통 -> gyro -> 정책 고리가 10~15 Hz 로 발진했다
+    # (docs/SIM2REAL_OSCILLATION_2026-09-28.md). 6 Hz 면 12.5 Hz 떨림은 약 0.38 배로 줄고,
+    # 1~2 Hz 균형 신호는 약 27 ms 늦어진다. 학습 쪽 gyro 관측에도 같은 필터를 넣어 재학습해야
+    # 한다. 필터 없이 학습한 모델에 켜는 것은 효과 확인용 시험이다.
+    # CSV: gyro_x/y/z = 필터 후(정책 입력), gyro_raw_x/y/z = 필터 전.
+    imu_gyro_filter_hz: 6.0
+    # 보행 위상(gait_phase). 모델 메타데이터 observation_names 에 gait_phase 가 있을 때만 쓰인다.
+    # 학습(mjlab_kid_RL tasks/kid_RL_env_cfg.py)과 같은 두 값을 넣고, 주기는 컨트롤러가 같은 식으로
+    # 계산한다:  cycle = swing / (0.5 - asin(band) / pi)   (0.55, 0.1 이면 1.175 s)
+    #   gait_swing_time_s        = _GAIT_SWING_TIME           한 발이 떠 있는 시간 [s]
+    #   gait_double_support_band = _GAIT_DOUBLE_SUPPORT_BAND
+    # 관측은 [sin(2*pi*phase), cos(2*pi*phase)], phase = (정책 시작 후 경과 시간 / 주기) mod 1.
+    # 학습 쪽 값을 바꾸면 여기도 같이 바꿀 것 -- 모델 메타데이터에 없어 자동 검사가 안 된다.
+    # 위상 모델인데 gait_swing_time_s 가 0 이면 기동을 거부한다.
+    gait_swing_time_s: 0.55
+    gait_double_support_band: 0.1
+    # READY_POSE와 SAFE_HOLD에서 controller가 만든 이동의 변화율 상한 [rad/s].
+    # 정책 target에는 적용하지 않는다. 학습이 정책 목표를 관절에 바로 넣었으므로
+    # 정책 경로를 여기서 smoothing(목표를 임의로 부드럽게 바꾸는 처리)하면 학습과
+    # 다른 동특성이 되기 때문이다.
+    target_rate_limit: 4.0
+    # projected_gravity[2]가 이 값보다 크면(=몸이 눕는 쪽) 낙상 후보.
+    fall_gravity_z_threshold: -0.5
+    # 낙상 조건이 이 시간 이상 연속으로 유지되어야 FAULT로 확정한다 [s].
+    fall_debounce_s: 0.10
+    # FAULT에서 자동 복구하기까지 모든 폴트 조건이 연속으로 깨끗해야 하는 시간 [s].
+    # 음수면 자동 복구하지 않고 운영자가 컨트롤러를 껐다 켤 때까지 잠긴다.
+    # 복구는 POLICY_RUNNING이 아니라 SAFE_HOLD로 간다 -- default 자세로 되돌아간
+    # 뒤 ready_to_start_policy()가 정책 재개 시점을 정한다.
+    # 정책이 non-finite action을 낸 폴트는 이 값과 무관하게 잠긴 채로 남는다.
+    # -1.0 = 잠금(latch). 운영자가 컨트롤러를 껐다 켜야 풀린다.
+    # 근거 두 가지.
+    # (1) 비교한 배포 스택 넷(unitree_rl_gym, booster_gym, legged_control,
+    #     unitree_rl_lab) 중 자동 복귀하는 것은 하나도 없다. 사람이 손을 뻗는
+    #     동안 로봇이 스스로 다시 깨어나는 것은 그 자체로 위험하다.
+    # (2) 아래 자동 복귀 게이트가 `!imu_enabled_ || (...)` 이라서, IMU 가 꺼져
+    #     있으면 아무 검사 없이 무조건 통과한다(kid_rl_controller.cpp:772).
+    #     즉 1.0 은 "1초 뒤 무조건 복귀"로 동작할 수 있었다.
+    fault_recovery_s: -1.0
+    # ── CSV 기록 ─────────────────────────────────────────────────────────────
+    # 컨트롤러가 활성화될 때 시작하고 비활성화될 때 닫는다. 실제 파일 쓰기는
+    # 별도 스레드가 하고, 제어 루프는 미리 할당된 링 버퍼에 복사만 한다.
+    log.enabled: true
+    # 빈 문자열이면 ~/kid_rl_logs/kid_rl_YYYYmmdd_HHMMSS.csv 로 자동 생성한다.
+    log.path: ""
+    # 1이면 매 제어 틱(100 Hz), 2면 두 틱마다 한 줄. 정책은 50 Hz라 2로 두면
+    # 정책 틱과 거의 맞고 파일 크기가 절반이 된다. 지터를 보려면 1로 둘 것.
+    log.decimation: 1
+    # 링 버퍼 크기 [샘플]. 100 Hz 기준 4000이면 40초 분량을 버틴다.
+    # 디스크가 잠깐 느려도 이 안에서 흡수된다. 넘치면 그 샘플은 버리고,
+    # 닫을 때 경고에 표시된다.
+    log.buffer_samples: 4000
+
+    # POLICY_RUNNING 진입 시 허용하는 최대 관절 자세 오차 [rad]. 0이면 검사 생략.
+    # 정책이 만든 목표의 변화율 상한 [rad/s]. 넘으면 즉시 FAULT (래치).
+    # 명령을 잘라 다듬는 게 아니라 발산을 감지해 멈추는 장치다. 자르면 정책이
+    # 내지 않은 궤적을 명령하게 되고 last_actions 도 거짓이 된다.
+    #
+    # 근거(2026-09-21 실기 로그): 이 장치가 없던 상태에서 정책이 3.8초 동안
+    # 발산했다. 목표값이 초당 8~9회 부호를 뒤집으며 진폭 2.4~4.4 rad,
+    # |action| 최대 9.35, 추종오차 평균 1.2 rad. 무릎 스윙의 정상 최대가
+    # 5~8 rad/s 이므로 그 두 배인 15를 기준으로 둔다.
+    # 정상 보행에서 이 값에 걸리면 올리기 전에 로그부터 확인할 것.
+    # 임시 실기 진단: 0이면 policy target slew 검사를 비활성화한다.
+    # 정책 명령을 제한하지 않으므로 반드시 지지대 위에서만 사용할 것.
+    policy_slew_limit: 0.0
+    # 연속으로 몇 틱 넘겨야 폴트로 볼지. 기동 직후에는 관측에 들어가는 이전 액션이
+    # 0 -> 큰 값으로 바뀌며 두세 틱 과도현상이 생긴다(학습의 에피소드 시작과 같다).
+    # 진짜 발산은 매 틱 이어지므로 3틱(50 Hz 기준 60 ms)이면 갈린다.
+    policy_slew_debounce_ticks: 3
+
+    # 0.35 -> 0.5 로 넓혔다가 0.35 로 되돌림 (2026-09-21).
+    # 되돌린 이유: 0.5 로 넓혔더니 head_pitch 가 0.497 rad 벗어난 상태로 진입했고,
+    # 정책이 시작 직후 바로 그 관절을 1.7 -> 2.5 -> 2.7 로 밀면서 전신이 발산했다.
+    # 진입이 막히면 값을 넓히지 말고 그 관절을 먼저 바로잡을 것.
+    # 이 값은 "정책이 학습한 분포 안에서 제어를 넘겨받는가"를 지키는 문이다.
+    # 넓힐수록 학습 때 본 적 없는 자세에서 정책이 시작되고, 정책 경로에는
+    # target_rate_limit 이 걸리지 않으므로 첫 추론이 큰 목표 변화를 낼 수 있다.
+    # 진입이 계속 막히면 값을 더 올리기 전에 어느 관절이 왜 벗어나는지 먼저 볼 것
+    # (부호가 반대면 Drive Mode 문제, 다리만 벗어나면 하중 문제).
+    entry_position_tolerance: 0.35
+    # 진입 자세 검사에서 빼는 관절 (2026-10-05). 팔은 MX-28 kp 27 의 P 제어만으로는
+    # 팔꿈치를 130deg 까지 못 들어 올려 정상 상태에서도 0.41 rad 가 남는다
+    # (실기 1.861, 시뮬 1.858 로 일치). 학습 때도 같은 처짐이 있으므로 분포 밖이 아니다.
+    # 넘어짐 검사(gravity_z)와 다리/허리/머리 자세 검사는 그대로 적용된다.
+    # 정책 출력과 무관하게 목표를 default_positions 로 고정하는 관절 (2026-10-05).
+    # 학습에서 joint_pos_action.clip = {"torso_yaw": (0.0, 0.0)} 으로 허리 목표를
+    # 0 rad 에 묶었다(mjlab_kid_RL kid_RL_env_cfg.py). 그 정책의 torso_yaw 출력은
+    # 학습 중 아무 효과가 없던 값이라, 여기서 고정하지 않으면 실기 허리가 임의로 돈다.
+    # 이 clip 없이 학습한 옛 모델을 돌릴 때는 목록을 비울 것.
+    fixed_target_joints:
+      - torso_yaw
+    entry_check_skip_joints:
+      - left_shoulder_pitch
+      - left_shoulder_roll
+      - left_shoulder_yaw
+      - left_elbow_pitch
+      - left_wrist_pitch
+      - right_shoulder_pitch
+      - right_shoulder_roll
+      - right_shoulder_yaw
+      - right_elbow_pitch
+      - right_wrist_pitch
+    # 비어 있으면 설치된 kid_rl/models/policy.onnx를 사용한다.
+    policy_path: ""
+    # true이면 ONNX를 실행하지 않고 0 action을 내므로 통신 시험에만 사용한다.
+    dry_run_policy: false

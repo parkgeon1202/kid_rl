@@ -1,0 +1,52 @@
+run2.csv: 26.92s 부터 전체 무응답(전원) -> 그 앞까지만
+
+비교 구간: 0 ~ 26.84 s (1343 틱), real dt 중앙값 19.98 ms
+gait_phase 차이 최대 6.51e-05 (시간 정렬 확인)
+
+IMU  (RMS 차이 / real 평균 / sim 평균)
+  gravity_x    0.064    -0.037    -0.005
+  gravity_y    0.080    -0.021    -0.010
+  gravity_z    0.006    -0.995    -0.999
+  gyro_x       0.683    +0.008    +0.001
+  gyro_y       1.416    +0.031    -0.002
+  gyro_z       0.928    +0.004    -0.017
+
+관절 (pos: rad, vel: rad/s) -- pos RMS 차이 큰 순
+  joint                       posΔrms posΔmean  velΔrms  actΔrms |Δa| real  |Δa| sim hfvel real hfvel sim
+  right_knee_pitch             0.2940  +0.0492    2.151    1.354     0.719     0.112      0.293     0.228
+  left_knee_pitch              0.2679  -0.0268    2.050    1.313     0.584     0.098      0.238     0.203
+  right_ankle_pitch            0.1972  -0.0073    1.356    0.871     0.421     0.066      0.193     0.142
+  right_ankle_roll_crank       0.1796  -0.0513    0.800    0.798     0.342     0.069      0.264     0.103
+  left_ankle_pitch             0.1727  +0.0335    1.311    1.098     0.740     0.073      0.304     0.141
+  torso_yaw                    0.1601  +0.1169    0.835    0.782     0.268     0.084      0.287     0.079
+  right_hip_yaw                0.1581  -0.1273    0.427    0.510     0.305     0.046      0.262     0.076
+  left_hip_yaw                 0.1572  -0.1125    0.379    0.514     0.269     0.045      0.181     0.050
+  left_hip_pitch               0.1533  +0.0016    1.116    0.948     0.712     0.062      0.234     0.111
+  left_hip_roll_crank          0.1499  +0.0719    0.550    0.610     0.282     0.061      0.196     0.110
+  right_hip_pitch              0.1459  -0.0272    1.108    3.229     0.690     0.075      0.218     0.124
+  head_pitch                   0.1269  -0.1127    0.761    0.461     0.226     0.052      0.494     0.042
+  right_hip_roll_crank         0.1155  -0.0401    0.506    0.678     0.256     0.059      0.197     0.096
+  left_ankle_roll_crank        0.1066  +0.0446    0.576    0.664     0.342     0.066      0.182     0.111
+  left_shoulder_pitch          0.0791  -0.0682    0.309    0.106     0.058     0.008      0.204     0.045
+  neck_yaw                     0.0721  -0.0457    0.352    0.603     0.353     0.054      0.194     0.032
+  left_shoulder_roll           0.0706  +0.0658    0.289    0.093     0.058     0.009      0.204     0.033
+  left_wrist_pitch             0.0701  -0.0667    0.058    0.171     0.084     0.012      0.042     0.005
+  right_wrist_pitch            0.0389  +0.0069    0.073    0.136     0.065     0.013      0.062     0.006
+  right_shoulder_pitch         0.0283  -0.0033    0.252    0.149     0.119     0.011      0.174     0.047
+  right_shoulder_roll          0.0281  -0.0209    0.162    0.092     0.065     0.010      0.112     0.034
+  left_shoulder_yaw            0.0222  +0.0143    0.128    0.108     0.070     0.012      0.117     0.005
+  right_elbow_pitch            0.0216  -0.0132    0.129    0.116     0.094     0.012      0.110     0.011
+  right_shoulder_yaw           0.0194  +0.0033    0.045    0.104     0.068     0.009      0.038     0.006
+  left_elbow_pitch             0.0165  -0.0103    0.177    0.113     0.078     0.010      0.154     0.009
+  (평균)                                                               0.291     0.045      0.198     0.074
+  |Δa| = 한 스텝 사이 action 변화 평균, hfvel = 5 Hz 이상 관절속도 RMS (떨림)
+
+시간 어긋남 (상호상관, 다리 pos; + 면 sim 이 늦음)
+  left_hip_pitch               -200 ms  (상관 0.06)
+  left_knee_pitch              -200 ms  (상관 0.10)
+  left_ankle_pitch             -200 ms  (상관 0.04)
+  right_hip_pitch              -200 ms  (상관 0.05)
+  right_knee_pitch             -200 ms  (상관 0.09)
+  right_ankle_pitch            -200 ms  (상관 0.13)
+
+그래프: /home/geonhu/deploy_ws/src/kid_rl/docs/observation_comparison_2026-09-28/ (imu, legs/upper _pos/_vel, legs_action, spectra, zoom_*)
