@@ -376,8 +376,8 @@ def _install_command_override(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
-        "--task", default="Mjlab-Velocity-Flat-KidRL",
-        choices=("Mjlab-Velocity-Flat-KidRL", "Mjlab-Velocity-KidRL"),
+        "--task", default="Mjlab-Velocity-Flat-KidRL-IRC",
+        choices=("Mjlab-Velocity-Flat-KidRL-IRC", "Mjlab-Velocity-Flat-KidRL", "Mjlab-Velocity-KidRL"),
     )
     parser.add_argument(
         "--onnx", type=Path, default=Path(__file__).resolve().parents[1] / "models/policy.onnx"

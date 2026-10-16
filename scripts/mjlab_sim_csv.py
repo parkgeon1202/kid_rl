@@ -150,8 +150,9 @@ def apply_actuator_scales(env, robot, joints, armature_scale, friction_scale, kp
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--task", default="Mjlab-Velocity-Flat-KidRL",
-                    choices=("Mjlab-Velocity-Flat-KidRL", "Mjlab-Velocity-KidRL"))
+    ap.add_argument("--task", default="Mjlab-Velocity-Flat-KidRL-IRC",
+                    choices=("Mjlab-Velocity-Flat-KidRL-IRC", "Mjlab-Velocity-Flat-KidRL",
+                             "Mjlab-Velocity-KidRL"))
     ap.add_argument("--onnx", type=Path, default=PKG / "models/policy.onnx")
     ap.add_argument("--controllers", type=Path, default=PKG / "config/controllers.yaml",
                     help="관절 순서·기본 자세·관절 한계·clip 을 읽는다 (실기 컨트롤러와 같은 파일)")
@@ -239,8 +240,10 @@ def main() -> int:
     jmax = np.asarray(ctl["joint_position_max"], dtype=np.float64)
     action_clip = float(ctl.get("action_clip", 0.0))
 
-    flat = args.task == "Mjlab-Velocity-Flat-KidRL"
-    env_cfg = make_kid_rl_velocity_env_cfg(play=True, flat=flat, enable_randomization=False)
+    flat = "Flat" in args.task
+    robot_kind = "irc" if args.task.endswith("-IRC") else "dance"
+    env_cfg = make_kid_rl_velocity_env_cfg(play=True, flat=flat, enable_randomization=False,
+                                           robot=robot_kind)
     # actor gyro 필터를 실기 컨트롤러 설정과 같게 맞춘다 (학습 기본값이 아니라 배포 설정 기준).
     gyro_fc = args.gyro_filter_hz if args.gyro_filter_hz is not None else \
         float(ctl.get("imu_gyro_filter_hz", 0.0))

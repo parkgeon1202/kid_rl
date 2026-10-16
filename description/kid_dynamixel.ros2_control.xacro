@@ -3,7 +3,8 @@
   <!-- Include this macro from the robot URDF.
 
        irc 브랜치: IRC 로봇은 다리 12개만 구동한다. 상체 13개(torso_yaw, 목, 머리, 팔) 서보 줄을
-       뺐고 다리 ID/kp 는 dance 로봇과 같다.
+       뺐고 다리 ID 와 나머지 kp 는 dance 로봇과 같다. 좌우 hip_yaw(MX-64)만 150: IRC 모델은
+       kp_fw 167 로 학습했고 실기 150 이 같은 PWM 이다(150 x 141.32 / 127 = 167).
 
        모터 모델은 학습 모델(mjlab kid_RL.xml)의 액추에이터 클래스와 대응한다:
          kp 27  = MX-28   (neck/어깨/팔꿈치/손목, head_pitch 제외)
@@ -216,13 +217,13 @@
         </transmission>
       </xacro:macro>
 
-      <xacro:kid_joint joint="right_hip_yaw" id="13" kp="46" sign="1"/>
+      <xacro:kid_joint joint="right_hip_yaw" id="13" kp="150" sign="1"/>
       <xacro:kid_joint joint="right_hip_roll_crank" id="11" kp="102" sign="1"/>
       <xacro:kid_joint joint="right_hip_pitch" id="15" kp="149" sign="1"/>
       <xacro:kid_joint joint="right_knee_pitch" id="17" kp="149" sign="1"/>
       <xacro:kid_joint joint="right_ankle_pitch" id="19" kp="149" sign="-1"/>
       <xacro:kid_joint joint="right_ankle_roll_crank" id="21" kp="102" sign="1"/>
-      <xacro:kid_joint joint="left_hip_yaw" id="12" kp="46" sign="1"/>
+      <xacro:kid_joint joint="left_hip_yaw" id="12" kp="150" sign="1"/>
       <xacro:kid_joint joint="left_hip_roll_crank" id="10" kp="102" sign="1"/>
       <xacro:kid_joint joint="left_hip_pitch" id="14" kp="149" sign="1"/>
       <xacro:kid_joint joint="left_knee_pitch" id="16" kp="149" sign="1"/>
