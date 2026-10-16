@@ -2,6 +2,9 @@
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
   <!-- Include this macro from the robot URDF.
 
+       irc 브랜치: IRC 로봇은 다리 12개만 구동한다. 상체 13개(torso_yaw, 목, 머리, 팔) 서보 줄을
+       뺐고 다리 ID/kp 는 dance 로봇과 같다.
+
        모터 모델은 학습 모델(mjlab kid_RL.xml)의 액추에이터 클래스와 대응한다:
          kp 27  = MX-28   (neck/어깨/팔꿈치/손목, head_pitch 제외)
          2026-10-12 실험: 팔 10개(어깨 3축/팔꿈치/손목)만 27 -> 120(head_pitch 와 같은 값). 학습 kp_fw 는 27 그대로라
@@ -67,8 +70,8 @@
         <plugin>dynamixel_hardware_interface/DynamixelHardware</plugin>
         <param name="port_name">${port}</param>
         <param name="baud_rate">${baud}</param>
-        <param name="number_of_joints">25</param>
-        <param name="number_of_transmissions">25</param>
+        <param name="number_of_joints">12</param>
+        <param name="number_of_transmissions">12</param>
         <param name="dynamixel_model_folder">/param/dxl_model</param>
         <!-- 두 가지 용도를 겸하는 값이다.
              (1) 런타임 허용치: 400ms = 50Hz에서 연속 20틱 실패하면 read() 가
@@ -213,31 +216,12 @@
         </transmission>
       </xacro:macro>
 
-      <xacro:kid_joint joint="torso_yaw" id="22" kp="46" sign="1"/>
-      <xacro:kid_joint joint="neck_yaw" id="23" kp="27" sign="1"/>
-      <!-- head_pitch 만 학습값 35 대신 120. 실기에서 낮은 게인일 때 머리가
-           중력에 눌려 0.54 rad 처진 채로 버티지 못했다(당시 kp=27 인 다른 MX-28
-           관절들은 오차 0.1 rad 이내, 추종 기울기 -0.115 로 목표를 거의 못 따라감).
-           머리는 보행 동역학에 거의 기여하지 않으므로 플랜트 차이보다 처짐을
-           없애는 쪽이 낫다. 다리 관절에는 같은 논리를 적용하지 말 것. -->
-      <xacro:kid_joint joint="head_pitch" id="24" kp="120" sign="1"/>
-      <xacro:kid_joint joint="left_shoulder_yaw" id="4" kp="120" sign="1"/>
-      <xacro:kid_joint joint="left_wrist_pitch" id="8" kp="120" sign="1"/>
-      <xacro:kid_joint joint="right_shoulder_yaw" id="5" kp="120" sign="1"/>
-      <xacro:kid_joint joint="right_wrist_pitch" id="9" kp="120" sign="1"/>
-
-      <xacro:kid_joint joint="right_shoulder_pitch" id="1" kp="120" sign="1"/>
-      <xacro:kid_joint joint="right_shoulder_roll" id="3" kp="120" sign="1"/>
-      <xacro:kid_joint joint="right_elbow_pitch" id="7" kp="120" sign="1"/>
       <xacro:kid_joint joint="right_hip_yaw" id="13" kp="46" sign="1"/>
       <xacro:kid_joint joint="right_hip_roll_crank" id="11" kp="102" sign="1"/>
       <xacro:kid_joint joint="right_hip_pitch" id="15" kp="149" sign="1"/>
       <xacro:kid_joint joint="right_knee_pitch" id="17" kp="149" sign="1"/>
       <xacro:kid_joint joint="right_ankle_pitch" id="19" kp="149" sign="-1"/>
       <xacro:kid_joint joint="right_ankle_roll_crank" id="21" kp="102" sign="1"/>
-      <xacro:kid_joint joint="left_shoulder_pitch" id="0" kp="120" sign="1"/>
-      <xacro:kid_joint joint="left_shoulder_roll" id="2" kp="120" sign="1"/>
-      <xacro:kid_joint joint="left_elbow_pitch" id="6" kp="120" sign="1"/>
       <xacro:kid_joint joint="left_hip_yaw" id="12" kp="46" sign="1"/>
       <xacro:kid_joint joint="left_hip_roll_crank" id="10" kp="102" sign="1"/>
       <xacro:kid_joint joint="left_hip_pitch" id="14" kp="149" sign="1"/>

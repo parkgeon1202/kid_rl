@@ -63,20 +63,10 @@ kid_rl:
     # (*_roll_cap, *_roll_actual)를 걸러낸 뒤 MJCF 선언 순서로 정렬한 결과이고,
     # ONNX 메타데이터 joint_names에서 같은 필터를 적용한 것과 일치한다.
     # action(25) 순서도 동일하다. 순서를 바꾸면 정책이 조용히 오작동한다.
+    # irc 브랜치: IRC 로봇(mjlab_kid_RL Mjlab-Velocity-Flat-KidRL-IRC)은 상체에 관절이 없고
+    # 다리 12개만 구동한다. 관측 45 = gyro 3 + 중력 3 + (pos, vel, action) x 12 + 명령 3.
+    # 다리 ID 와 kp 는 dance 로봇과 같다(description/kid_dynamixel.ros2_control.xacro).
     joints:
-      - torso_yaw
-      - neck_yaw
-      - head_pitch
-      - left_shoulder_pitch
-      - left_shoulder_roll
-      - left_shoulder_yaw
-      - left_elbow_pitch
-      - left_wrist_pitch
-      - right_shoulder_pitch
-      - right_shoulder_roll
-      - right_shoulder_yaw
-      - right_elbow_pitch
-      - right_wrist_pitch
       - left_hip_yaw
       - left_hip_roll_crank
       - left_hip_pitch
@@ -92,19 +82,6 @@ kid_rl:
     # mjlab HOME_KEYFRAME. 반올림된 ONNX 메타데이터(1e-3) 대신
     # math.radians(15) / math.radians(30) 원본값을 쓴다.
     default_positions:
-      - 0.0                    # torso_yaw
-      - 0.0                    # neck_yaw
-      - 0.0                    # head_pitch
-      - 0.0                    # left_shoulder_pitch
-      - 0.0                    # left_shoulder_roll
-      - 0.0                    # left_shoulder_yaw
-      - -2.2689280275926285    # left_elbow_pitch  (-130deg, arms folded)
-      - 0.0                    # left_wrist_pitch
-      - 0.0                    # right_shoulder_pitch
-      - 0.0                    # right_shoulder_roll
-      - 0.0                    # right_shoulder_yaw
-      - 2.2689280275926285     # right_elbow_pitch (+130deg, arms folded)
-      - 0.0                    # right_wrist_pitch
       - 0.0                    # left_hip_yaw
       - 0.0                    # left_hip_roll_crank
       - -0.2617993877991494    # left_hip_pitch
@@ -120,19 +97,6 @@ kid_rl:
     # MJCF jnt_range. 정책이 학습된 범위와 같다. 실기 DYNAMIXEL 가동범위를
     # 측정해 더 좁힐 수는 있어도 넓히면 안 된다.
     joint_position_min:
-      - -3.142                 # torso_yaw
-      - -3.14159               # neck_yaw
-      - -1.5                   # head_pitch
-      - -3.14159               # left_shoulder_pitch
-      - -1.138                 # left_shoulder_roll
-      - -3.14159               # left_shoulder_yaw
-      - -2.443461              # left_elbow_pitch  (-140deg fold limit)
-      - -1.34                  # left_wrist_pitch
-      - -3.14159               # right_shoulder_pitch
-      - -1.5                   # right_shoulder_roll
-      - -3.14159               # right_shoulder_yaw
-      - -2.496                 # right_elbow_pitch
-      - -1.34                  # right_wrist_pitch
       - -3.142                 # left_hip_yaw
       - -1.186824              # left_hip_roll_crank
       - -2.021                 # left_hip_pitch
@@ -152,19 +116,6 @@ kid_rl:
     # 조용히 버려진다. 4095 틱 = 3.14005867 rad 이 실제 최댓값이다.
     # description/kid_rl.urdf.xacro 의 <limit upper> 와 같이 유지할 것.
     joint_position_max:
-      - 3.14005                # torso_yaw
-      - 3.14159                # neck_yaw
-      - 1.57                   # head_pitch
-      - 3.14159                # left_shoulder_pitch
-      - 1.5                    # left_shoulder_roll
-      - 3.14159                # left_shoulder_yaw
-      - 2.089                  # left_elbow_pitch
-      - 0.119                  # left_wrist_pitch
-      - 3.14159                # right_shoulder_pitch
-      - 1.138                  # right_shoulder_roll
-      - 3.14159                # right_shoulder_yaw
-      - 2.443461               # right_elbow_pitch (+140deg fold limit)
-      - 0.119                  # right_wrist_pitch
       - 3.14005                # left_hip_yaw
       - 1.186824               # left_hip_roll_crank
       - 1.036                  # left_hip_pitch
@@ -382,19 +333,7 @@ kid_rl:
     # 0 rad 에 묶었다(mjlab_kid_RL kid_RL_env_cfg.py). 그 정책의 torso_yaw 출력은
     # 학습 중 아무 효과가 없던 값이라, 여기서 고정하지 않으면 실기 허리가 임의로 돈다.
     # 이 clip 없이 학습한 옛 모델을 돌릴 때는 목록을 비울 것.
-    fixed_target_joints:
-      - torso_yaw
-    entry_check_skip_joints:
-      - left_shoulder_pitch
-      - left_shoulder_roll
-      - left_shoulder_yaw
-      - left_elbow_pitch
-      - left_wrist_pitch
-      - right_shoulder_pitch
-      - right_shoulder_roll
-      - right_shoulder_yaw
-      - right_elbow_pitch
-      - right_wrist_pitch
+    # irc 브랜치: torso_yaw 와 팔 관절이 없으므로 fixed_target_joints, entry_check_skip_joints 를 뺐다.
     # 비어 있으면 설치된 kid_rl/models/policy.onnx를 사용한다.
     policy_path: ""
     # true이면 ONNX를 실행하지 않고 0 action을 내므로 통신 시험에만 사용한다.
