@@ -4,7 +4,7 @@
 
 Node layout::
 
-    robot_state_publisher  --/robot_description-->  ros2_control_node
+    robot_state_publisher  --/kid_rl/robot_description-->  ros2_control_node
                                                       +- DynamixelHardware  (plugin)
                                                       +- KidRlController    (plugin)
                                                       +- joint_state_broadcaster
@@ -23,6 +23,8 @@ IMU, an upright robot, and every joint within entry_position_tolerance of the
 default pose. Pass `autostart:=true` to activate at launch instead.
 """
 
+import yaml
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction
 from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
@@ -31,8 +33,35 @@ from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
+# MX-28 Goal PWM 범위 (PWM Limit 기본값 885).
+_GOAL_PWM_MAX = 885
+
+
+def _gripper_goal_pwm(controllers_path):
+    """controllers.yaml 의 dynamixel_hardware.ros__parameters.gripper_goal_pwm. 없으면 ""."""
+    with open(controllers_path, encoding="utf-8") as f:
+        params = yaml.safe_load(f) or {}
+    value = (params.get("dynamixel_hardware", {}).get("ros__parameters", {})
+             .get("gripper_goal_pwm"))
+    if value is None:
+        return ""
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _GOAL_PWM_MAX:
+        raise RuntimeError(
+            f"gripper_goal_pwm must be an integer in [0, {_GOAL_PWM_MAX}], got {value!r}")
+    return str(value)
+
+
 def _setup(context, *args, **kwargs):
     pkg = FindPackageShare("kid_rl")
+
+    # xacro is expanded at launch time, not build time, so `port:=` and friends
+    # can be overridden without rebuilding.
+    controllers = PathJoinSubstitution([pkg, "config", "controllers.yaml"])
+
+    # ros2_control 하드웨어는 controllers.yaml 을 읽지 않는다(파라미터는 URDF 에서 온다).
+    # 그리퍼 Goal PWM 은 yaml 에서 고치도록 여기서 읽어 xacro 인자로 넘기고, 드라이버가
+    # on_init 에서 gpio param 으로 서보에 쓴다.
+    gripper_goal_pwm = _gripper_goal_pwm(controllers.perform(context))
 
     # xacro is expanded at launch time, not build time, so `port:=` and friends
     # can be overridden without rebuilding.
@@ -42,23 +71,31 @@ def _setup(context, *args, **kwargs):
         " port:=", LaunchConfiguration("port"),
         " baud:=", LaunchConfiguration("baud"),
         " rw_rate:=", LaunchConfiguration("rw_rate"),
+        " gripper_goal_pwm:=", gripper_goal_pwm,
     ])
 
-    controllers = PathJoinSubstitution([pkg, "config", "controllers.yaml"])
-
-    # Publishes /robot_description with transient_local durability, which is how
+    # Publishes /kid_rl/robot_description with transient_local durability, which is how
     # controller_manager receives it (it subscribes; it does not read a file).
     # This package currently has only a control-schema URDF, not the real 33
     # joint MJCF kinematic tree.  Do not let robot_state_publisher turn that
     # placeholder into plausible-looking but false TF transforms.
+    #
+    # 토픽은 /robot_description 이 아니라 /kid_rl/robot_description 이다. 비전과 매니 launch 도
+    # 각자 robot_state_publisher 로 /robot_description 에 ros2_control 태그 없는 URDF 를 낸다.
+    # controller_manager 는 마지막으로 받은 description 을 컨트롤러에 넘기므로, 같은 토픽을 쓰면
+    # kid_rl configure 가 "no 'ros2_control' tag found" 로 실패한다. 노드 이름도 겹치지 않게 한다.
     rsp = Node(
         package="robot_state_publisher",
         executable="robot_state_publisher",
+        name="kid_rl_robot_state_publisher",
         output="both",
         parameters=[{
             "robot_description": ParameterValue(robot_description, value_type=str),
         }],
-        remappings=[("joint_states", "/kid_control_description/unused_joint_states")],
+        remappings=[
+            ("joint_states", "/kid_control_description/unused_joint_states"),
+            ("robot_description", "/kid_rl/robot_description"),
+        ],
     )
 
     # The RT loop lives here: read() -> update() -> write() at update_rate.
@@ -68,11 +105,16 @@ def _setup(context, *args, **kwargs):
         package="controller_manager",
         executable="ros2_control_node",
         parameters=[controllers],
-        # controller_manager subscribes on its private
-        # ``~/robot_description`` topic.  robot_state_publisher publishes the
-        # description on ``/robot_description``; without this remap the
-        # ResourceManager never receives the URDF and both spawners wait/fail.
-        remappings=[("~/robot_description", "/robot_description")],
+        # robot_state_publisher publishes the description on
+        # ``/kid_rl/robot_description``; without this remap the ResourceManager
+        # never receives the URDF and both spawners wait/fail.  The Jazzy
+        # controller_manager in ~/ros2_ws subscribes to the relative
+        # ``robot_description`` (= /robot_description); some versions use the
+        # private ``~/robot_description``.  Remap both.
+        remappings=[
+            ("robot_description", "/kid_rl/robot_description"),
+            ("~/robot_description", "/kid_rl/robot_description"),
+        ],
         output="screen",
         emulate_tty=True,
     )
@@ -92,12 +134,6 @@ def _setup(context, *args, **kwargs):
         ),
         rsp,
         control_node,
-        Node(
-            package="kid_rl",
-            executable="gamepad_policy_supervisor.py",
-            name="gamepad_policy_supervisor",
-            output="screen",
-        ),
         spawner("joint_state_broadcaster"),
     ]
 

@@ -72,12 +72,11 @@ class Gamepad:
     """
 
     def __init__(self, path: str, config: dict):
-        self._limit = np.array([float(config["gamepad.max_vx"]),
-                                float(config["gamepad.max_vy"]),
-                                float(config["gamepad.max_wz"])])
-        self._deadband = np.array([float(config["gamepad.deadband_vx"]),
-                                   float(config["gamepad.deadband_vy"]),
-                                   float(config["gamepad.deadband_wz"])])
+        self._limit = np.array([float(config["walk_command.max_vx"]),
+                                float(config["walk_command.max_vy"]),
+                                float(config["walk_command.max_wz"])])
+        # 실기 컨트롤러에서 게임패드를 뺄 때(2026-10-30) 마지막으로 쓰던 값.
+        self._deadband = np.full(3, 0.1)
         self._axes = {_ABS_X: 0.0, _ABS_Y: 0.0, _ABS_RX: 0.0}
         self._range = self._absinfo_ranges(path)
         self._lock = threading.Lock()
@@ -322,8 +321,8 @@ def main() -> int:
 
     key_cmd = np.zeros(3)
     reset_flag = threading.Event()
-    step = np.array([float(cfg["gamepad.max_vx"]), float(cfg["gamepad.max_vy"]),
-                     float(cfg["gamepad.max_wz"])])
+    step = np.array([float(cfg["walk_command.max_vx"]), float(cfg["walk_command.max_vy"]),
+                     float(cfg["walk_command.max_wz"])])
 
     def on_key(keycode):
         c = chr(keycode) if 0 < keycode < 0x110000 else ""

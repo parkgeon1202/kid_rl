@@ -398,7 +398,7 @@ def main() -> int:
     parser.add_argument("--gamepad-name-hint", default="Gulikit X")
     parser.add_argument(
         "--deadband", type=float, default=0.1,
-        help="Stick deadband for all three axes (controllers.yaml gamepad.deadband_*).",
+        help="Stick deadband for all three axes.",
     )
     parser.add_argument("--max-vx", type=float, default=0.4)
     parser.add_argument("--max-vy", type=float, default=0.3)

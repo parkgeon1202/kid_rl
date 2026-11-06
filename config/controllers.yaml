@@ -45,11 +45,26 @@ controller_manager:
     kid_rl:
       type: kid_rl/KidRlController
 
+# ros2_control 하드웨어(DynamixelHardware)용 값. 하드웨어는 이 파일을 직접 읽지 않고,
+# launch/kid_rl.launch.py 가 읽어 xacro 인자로 넘긴 뒤 드라이버가 on_init 에서 서보에 쓴다.
+# 런치를 다시 하면 적용된다(재빌드 불필요). 이 이름의 노드는 없다.
+dynamixel_hardware:
+  ros__parameters:
+    # 그리퍼(ID 6, MX-28) Goal PWM [0, 885]. 885 = 100%. 쥐는 힘의 상한이다.
+    # colcon_ws dynamixel_hardware_interface 의 GRIPPER_GOAL_PWM(600) 과 같은 값으로 시작한다.
+    # 줄을 지우면 서보에 남아 있는 값을 그대로 쓴다.
+    gripper_goal_pwm: 600
+
 # /joint_states를 200 Hz로 뿌릴 이유가 없다. DDS와 executor 부담만 커진다.
 # update_rate는 controller_manager update_rate의 약수여야 경고가 안 뜬다 (50 % 50 == 0).
 joint_state_broadcaster:
   ros__parameters:
     update_rate: 50
+    # /joint_states 가 아니라 /joint_state_broadcaster/joint_states 로 보낸다.
+    # vision pan_tilt_node 가 /joint_states 에 torso_yaw·팔 = 0, tilt = 명령값을 넣어
+    # 카메라 TF 를 만든다. 같은 이름(torso_yaw, 팔 6개)을 실측값으로 섞어 보내면
+    # vision robot_state_publisher 의 TF 가 두 값 사이를 오가서 비전 좌표가 튄다.
+    use_local_topics: true
 
 kid_rl:
   ros__parameters:
@@ -96,6 +111,8 @@ kid_rl:
       - 0.0                    # right_ankle_roll_crank
     # MJCF jnt_range. 정책이 학습된 범위와 같다. 실기 DYNAMIXEL 가동범위를
     # 측정해 더 좁힐 수는 있어도 넓히면 안 된다.
+    # POLICY_RUNNING 에서만 건다. SAFE_HOLD(모션·매니)·READY_POSE·FAULT 는 서보 범위
+    # (+-3.14005 rad)만 건다(2026-10-30: 허들 무릎 2.09 가 1.57 에서 잘려 발끝이 들렸다).
     joint_position_min:
       - -3.142                 # left_hip_yaw
       - -1.186824              # left_hip_roll_crank
@@ -133,30 +150,41 @@ kid_rl:
     policy_rate_hz: 50.0
     # 기동 시 측정 자세 -> default_positions 보간 시간 [s].
     ready_pose_duration_s: 2.0
-    # 이 시간 넘게 cmd_vel이 없으면 fault가 아니라 "속도 명령 0"으로 취급한다.
+    # 이 시간 넘게 속도 명령(walk_command.topic)이 없으면 fault가 아니라
+    # "속도 명령 0"으로 취급한다.
     command_timeout_s: 0.25
+    # 보행 속도 명령(geometry_msgs/TwistStamped). 비우면 구독하지 않는다.
+    #   twist.linear.x [m/s] 전후진, twist.linear.y [m/s] 옆걸음(왼쪽 +), twist.angular.z [rad/s]
+    #   회전(반시계 +). walk_command.max_vx / max_vy / max_wz 로 자른다. 정지는 속도 0.
+    #   유한하지 않은 값, header.stamp 가 0 / 미래 / command_timeout_s 보다 오래된 메시지는 버린다.
+    # task planner 가 이 토픽으로 보낸다(타입은 Master2IkMsg 가 아니라 TwistStamped).
+    walk_command.topic: "/master2ik"
+    # 명령 크기 상한. 2026-10-15: vx 를 0.5 로 올렸다가 0.4 로 되돌렸다.
+    walk_command.max_vx: 0.4
+    # 2026-10-15: 옆걸음은 학습 범위(+-0.4)보다 낮은 0.3 으로 제한한다(실기에서 0.4 는 무리였음).
+    walk_command.max_vy: 0.3
+    walk_command.max_wz: 0.7
+    # 자동 정지: walk_command.topic 이 (0, 0, 0) 을 보내는 동안 정책은 그대로 서서 균형을 잡고,
+    # 자이로 크기(imu_gyro_filter_hz 필터 후)가 gyro_threshold [rad/s] 미만으로 settle_s 동안
+    # 유지되면 enable_policy 를 false 로 내린다(~/enable_policy=false 와 같음): SAFE_HOLD 로 가서 default
+    # 자세로 target_rate_limit 이동, motion_operator 다리 명령을 받는다. 그 뒤 이 토픽에 0 이
+    # 아닌 속도가 오면 enable_policy 를 다시 true 로 올려 진입 검사 뒤 걷는다. 단, 사람이
+    # ~/enable_policy 를 직접 보냈으면 그 값이 우선한다: 사람이 끈 정책은 토픽
+    # 명령으로 켜지지 않는다.
+    # 명령이 끊긴 0 은 자동 정지를 걸지 않는다.
+    auto_hold.enabled: true
+    auto_hold.gyro_threshold: 0.1
+    auto_hold.settle_s: 0.5
+    # 보행 정지 상태(std_msgs/Bool, reliable + transient_local). true = SAFE_HOLD 이고
+    # enable_policy=false 라 다리가 /dynamixel_control 명령을 따른다(모션 가능). task planner 는
+    # walk_stop 뒤 이 값이 true 가 될 때까지 기다렸다가 모션/매니를 시작한다. 값이 바뀌면 바로,
+    # 아니면 rate_hz 로 다시 낸다. 비우면 끈다.
+    walk_state.topic: "/walk_stopped"
+    walk_state.rate_hz: 10.0
     # 이 시간 넘게 IMU가 없으면 POLICY_RUNNING에서 FAULT로 간다.
     imu_timeout_s: 0.10
 
     # ── 직접 입력 장치 (ROS topic을 사용하지 않음) ─────────────────────────
-    gamepad.enabled: true
-    # 비워 두면 VID/PID를 먼저 찾고, 실패하면 name_hint로 /dev/input/event*를 찾는다.
-    gamepad.device_path: ""
-    gamepad.name_hint: "Gulikit X"
-    gamepad.vendor_id: 1118      # 0x045e
-    gamepad.product_id: 654      # 0x028e
-    # 스틱 위치를 그대로 속도 명령으로 쓴다: cmd = 정규화된 축 [-1, 1] * max.
-    # 끝까지 밀면 max 값, 놓으면 바로 0. |축| < deadband 는 0 (중립 떨림 제거).
-    # (2026-10-04 이전에는 cmd += stick * step 으로 누적하는 방식이었다.)
-    # 2026-10-15: 0.5 로 올렸다가 0.4 로 되돌렸다.
-    gamepad.max_vx: 0.4
-    # 2026-10-15: 옆걸음은 학습 범위(+-0.4)보다 낮은 0.3 으로 제한한다(실기에서 0.4 는 무리였음).
-    gamepad.max_vy: 0.3
-    gamepad.max_wz: 0.7
-    gamepad.deadband_vx: 0.1
-    gamepad.deadband_vy: 0.1
-    gamepad.deadband_wz: 0.1
-
     # false 면 IMU 스레드를 아예 띄우지 않고(kid_rl_controller.cpp:377),
     # 컨트롤러는 초기값 valid=false 를 계속 읽는다. 그 결과 SAFE_HOLD 에서
     # "IMU 가 stale 하거나 invalid" 경고만 반복하며 POLICY_RUNNING 으로 넘어가지
@@ -334,6 +362,97 @@ kid_rl:
     # 학습 중 아무 효과가 없던 값이라, 여기서 고정하지 않으면 실기 허리가 임의로 돈다.
     # 이 clip 없이 학습한 옛 모델을 돌릴 때는 목록을 비울 것.
     # irc 브랜치: torso_yaw 와 팔 관절이 없으므로 fixed_target_joints, entry_check_skip_joints 를 뺐다.
+    # ── IRC 상체 고정 관절 ──────────────────────────────────────────────────
+    # policy 관측·action 에 들어가지 않는 관절. 학습 모델(kid_RL_irc.xml)에서는 상체가 관절 없이
+    # 고정이라, 실기에서도 같은 자세로 붙잡아야 한다. 활성화 때 측정 자세에서 출발해
+    # hold_rate_limit [rad/s] 로 천천히 목표까지 간 뒤 모든 모드(FAULT 포함)에서 그 자리를 유지한다.
+    # 부호는 학습 모델의 kid 규약: 왼쪽 관절 축 +y, 오른쪽 축 -y 라서 "앞으로"가 왼쪽 -, 오른쪽 +.
+    # (dance 로봇에서 팔꿈치를 앞으로 접은 자세가 왼 -130도, 오른 +130도였던 것과 같은 규칙)
+    # 처음 켤 때는 로봇을 매단 채, 팔이 앞으로 가는지 보고 반대면 바로 끌 것.
+    hold_joints:
+      - left_shoulder_pitch    # ID 0
+      - right_shoulder_pitch   # ID 1
+      - left_shoulder_roll     # ID 2
+      - right_shoulder_roll    # ID 3
+      - left_elbow_pitch       # ID 4
+      - right_elbow_pitch      # ID 5
+      - gripper                # ID 6
+      - torso_yaw              # ID 22
+      - camera_tilt            # ID 23
+    hold_positions:
+      - -0.5235987755982988    # 왼 어깨 pitch 30도 앞
+      - 0.5235987755982988     # 오른 어깨 pitch 30도 앞
+      - 0.0
+      - 0.0
+      - -1.5707963267948966    # 왼 팔꿈치 90도 앞
+      - 1.0471975511965976     # 오른 팔꿈치 60도 앞
+      - 0.0
+      - 0.0
+      - 0.0                    # camera_tilt: 쓰지 않음(아래 external.pan_tilt_topic 참고)
+    hold_rate_limit: 2.0
+    # enable_policy=true 가 되면 팔(0~5)·허리(22)는 외부 명령을 놓고 걸으면서 hold_positions 로
+    # hold_rate_limit 으로 돌아간다(모션·매니가 끝난 팔 자세로 걸으면 무게 중심이 뒤로 간다,
+    # 2026-10-30 CSV). 그리퍼(6)와 tilt(23)는 계속 외부 명령을 따른다.
+
+    # ── 모션 P gain ──────────────────────────────────────────────────────────
+    # SAFE_HOLD 이고 enable_policy=false 인 동안(motion_operator 모션, 매니) 모든 서보의 Position
+    # P Gain 을 아래 값으로 올리고, 그 밖의 모드(보행)에서는 xacro 의 학습 값으로 되돌린다.
+    # 순서는 joints(12) 다음 hold_joints(9). 하체 800, 팔·그리퍼 200, 허리 850, tilt 600 (2026-10-30 결정).
+    # 참고로 모션 파일을 만든 colcon_ws 는 상체(0~6) 200, 나머지는 공장 기본값
+    # (MX-28/64/106(2.0) 850, XH540 800)이었다.
+    # xacro 에 <command_interface name="Position P Gain"/> 이 없으면(mock 등) 스스로 꺼진다.
+    # POLICY_RUNNING 진입은 학습 gain 을 2 틱 쓴 뒤에만 한다.
+    motion_gain.enabled: true
+    motion_gain.p_gains:
+      - 800.0   # left_hip_yaw          MX-64
+      - 800.0   # left_hip_roll_crank   MX-106
+      - 800.0   # left_hip_pitch        XH540
+      - 800.0   # left_knee_pitch       XH540
+      - 800.0   # left_ankle_pitch      XH540
+      - 800.0   # left_ankle_roll_crank MX-106
+      - 800.0   # right_hip_yaw
+      - 800.0   # right_hip_roll_crank
+      - 800.0   # right_hip_pitch
+      - 800.0   # right_knee_pitch
+      - 800.0   # right_ankle_pitch
+      - 800.0   # right_ankle_roll_crank
+      - 200.0   # left_shoulder_pitch   ID 0
+      - 200.0   # right_shoulder_pitch  ID 1
+      - 200.0   # left_shoulder_roll    ID 2
+      - 200.0   # right_shoulder_roll   ID 3
+      - 200.0   # left_elbow_pitch      ID 4
+      - 200.0   # right_elbow_pitch     ID 5
+      - 200.0   # gripper               ID 6
+      - 850.0   # torso_yaw             ID 22 MX-64 (colcon_ws 와 같은 공장값)
+      - 600.0   # camera_tilt           ID 23 MX-28 (xacro kp 와 같게: 항상 600)
+
+    # ── 외부 모터 명령 / 상태 (colcon_ws dynamixel_hardware_interface 노드 대체) ──
+    # motion_operator, humanoid_manipulation, 비전 pan_tilt 노드가 예전 노드와 주고받던 토픽을
+    # 이 컨트롤러가 받는다. 메시지는 dynamixel_interfaces 패키지(DynamixelMsgs 에 id 추가)다.
+    # 모터는 배열 순서가 아니라 원소의 id 로 찾는다(xacro <관절>_dxl gpio 의 ID).
+    # 모르는 id, 중복 id, 유한하지 않은 값, 음수 profile, 그리퍼 토픽인데 id != gripper_id 이면
+    # 메시지 전체를 버리고 ERROR 로그를 남긴다.
+    #   상체(hold_joints): 모든 모드에서 따른다(FAULT 에서는 새 명령을 받지 않음). 한 번 받으면
+    #     hold_positions 대신 그 목표를 계속 유지한다.
+    #   다리(joints): SAFE_HOLD 이고 enable_policy=false 일 때만 따른다. 정책이 요청되면 다리 명령을
+    #     놓고 target_rate_limit 으로 default 자세로 돌아간 뒤 진입 검사를 거친다.
+    # profile_velocity/acceleration 은 서보 레지스터가 아니라 컨트롤러가 주기마다 흉내 낸다
+    # (다리 학습 조건 Profile 0 을 유지하려고). 0 은 서보와 같이 "제한 없음"이다.
+    external.enabled: true
+    external.accept_policy_joints: true
+    external.control_topic: "/dynamixel_control"
+    external.gripper_topic: "/gripper_control"
+    # PanTilt.tilt [degree] -> tilt_id 모터. pan 은 모터가 없어서 쓰지 않는다.
+    # tilt 는 이 토픽으로만 움직인다: hold_positions 로 가지 않고(SAFE_HOLD 포함 모든 모드),
+    # 첫 명령 전에는 활성화 때 측정 자세를 유지한다. /dynamixel_control 에 tilt_id 가 있으면
+    # 그 메시지 전체를 버린다.
+    external.pan_tilt_topic: "/RealsensePanTilt"
+    # DynamixelStateMsgs: header(stamp = 상태를 읽은 틱) + 모터마다 {id, position, velocity}.
+    # 순서는 ID 오름차순(0..6, 10..21, 22, 23)이지만, 받는 쪽은 순서가 아니라 id 로 찾아야 한다.
+    external.status_topic: "/motor_status"
+    external.status_rate_hz: 50.0
+    external.gripper_id: 6
+    external.tilt_id: 23
     # 비어 있으면 설치된 kid_rl/models/policy.onnx를 사용한다.
     policy_path: ""
     # true이면 ONNX를 실행하지 않고 0 action을 내므로 통신 시험에만 사용한다.

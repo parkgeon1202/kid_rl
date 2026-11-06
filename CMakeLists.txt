@@ -8,7 +8,9 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(controller_interface REQUIRED)
+find_package(dynamixel_interfaces REQUIRED)
 find_package(hardware_interface REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
@@ -42,20 +44,21 @@ set_target_properties(onnxruntime::onnxruntime PROPERTIES
 
 add_library(${PROJECT_NAME} SHARED
   src/csv_logger.cpp
-  src/gamepad.cpp
   src/imu.cpp
   src/kid_rl_controller.cpp
   src/policy_runner.cpp
   src/rx_missing_monitor.cpp
   src/motor_telemetry_monitor.cpp
-  src/bus_timing_monitor.cpp)
+  src/bus_timing_monitor.cpp
+  src/external_commands.cpp)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_17)
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 ament_target_dependencies(${PROJECT_NAME}
-  ament_index_cpp controller_interface hardware_interface pluginlib rclcpp rclcpp_lifecycle
-  realtime_tools std_msgs)
+  ament_index_cpp controller_interface dynamixel_interfaces geometry_msgs
+  hardware_interface pluginlib rclcpp
+  rclcpp_lifecycle realtime_tools std_msgs)
 target_link_libraries(${PROJECT_NAME}
   "$<BUILD_INTERFACE:onnxruntime::onnxruntime>")
 # BUILD_INTERFACE 로만 링크하면 IMPORTED 타깃의 디렉터리가 설치 RPATH 에 남지 않는다.
@@ -96,7 +99,6 @@ pluginlib_export_plugin_description_file(
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config description docs launch models test DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS
-  scripts/gamepad_policy_supervisor.py
   scripts/kid_rl_policy.sh
   DESTINATION lib/${PROJECT_NAME})
 install(FILES kid_rl_plugin.xml README.md
@@ -109,6 +111,7 @@ install(TARGETS ${PROJECT_NAME}
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(
-  ament_index_cpp controller_interface hardware_interface pluginlib rclcpp rclcpp_lifecycle
-  realtime_tools std_msgs)
+  ament_index_cpp controller_interface dynamixel_interfaces geometry_msgs
+  hardware_interface pluginlib rclcpp
+  rclcpp_lifecycle realtime_tools std_msgs)
 ament_package()

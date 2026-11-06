@@ -7,12 +7,14 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "ament_index_cpp/get_package_share_directory.hpp"
+#include "hardware_interface/component_parser.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "pluginlib/class_list_macros.hpp"
 
@@ -26,6 +28,8 @@ constexpr double kPi = 3.14159265358979323846;
 /// the loop was starved; integrating it verbatim would produce a step change.
 constexpr double kMaxIntegrationPeriodS = 0.1;
 constexpr char kHardwareStateInterface[] = "hardware_state";
+/// Goal Position 4095 tick 에 해당하는 각도. 그 이상은 4096 tick 이 되어 버려진다.
+constexpr double kMaxGoalPositionRad = 3.14005;
 
 double clamp(double value, double low, double high) {return std::max(low, std::min(value, high));}
 
@@ -60,7 +64,7 @@ controller_interface::CallbackReturn KidRlController::on_init()
   // Runs before the node has a lifecycle state, so nothing here may touch the
   // hardware -- validation that needs the resolved joint count belongs in
   // on_configure(). The values that cannot survive a silent truncation (the
-  // 16-bit gamepad IDs, the baud rate) throw instead of truncating.
+  // baud rate) throw instead of truncating.
   try {
     joints_ = auto_declare<std::vector<std::string>>("joints", {});
     default_positions_ = auto_declare<std::vector<double>>("default_positions", {});
@@ -69,6 +73,16 @@ controller_interface::CallbackReturn KidRlController::on_init()
     policy_rate_hz_ = auto_declare<double>("policy_rate_hz", 50.0);
     ready_pose_duration_s_ = auto_declare<double>("ready_pose_duration_s", 2.0);
     command_timeout_s_ = auto_declare<double>("command_timeout_s", 0.25);
+    walk_command_topic_ = auto_declare<std::string>("walk_command.topic", "/master2ik");
+    walk_command_max_ = {
+      auto_declare<double>("walk_command.max_vx", 0.4),
+      auto_declare<double>("walk_command.max_vy", 0.3),
+      auto_declare<double>("walk_command.max_wz", 0.7)};
+    auto_hold_enabled_ = auto_declare<bool>("auto_hold.enabled", true);
+    auto_hold_gyro_threshold_ = auto_declare<double>("auto_hold.gyro_threshold", 0.1);
+    auto_hold_settle_s_ = auto_declare<double>("auto_hold.settle_s", 0.5);
+    walk_state_topic_ = auto_declare<std::string>("walk_state.topic", "/walk_stopped");
+    walk_state_rate_hz_ = auto_declare<double>("walk_state.rate_hz", 10.0);
     imu_timeout_s_ = auto_declare<double>("imu_timeout_s", 0.10);
     action_scale_ = auto_declare<double>("action_scale", 0.5);
     action_clip_ = auto_declare<double>("action_clip", 5.0);
@@ -84,28 +98,27 @@ controller_interface::CallbackReturn KidRlController::on_init()
       auto_declare<std::vector<std::string>>("entry_check_skip_joints", {});
     fixed_target_joints_ =
       auto_declare<std::vector<std::string>>("fixed_target_joints", {});
+    hold_joints_ = auto_declare<std::vector<std::string>>("hold_joints", {});
+    hold_positions_ = auto_declare<std::vector<double>>("hold_positions", {});
+    hold_rate_limit_ = auto_declare<double>("hold_rate_limit", 0.5);
+    motion_gain_enabled_ = auto_declare<bool>("motion_gain.enabled", true);
+    motion_gains_ = auto_declare<std::vector<double>>("motion_gain.p_gains", {});
+    external_enabled_ = auto_declare<bool>("external.enabled", false);
+    external_accept_policy_joints_ = auto_declare<bool>("external.accept_policy_joints", true);
+    external_config_.control_topic =
+      auto_declare<std::string>("external.control_topic", "/dynamixel_control");
+    external_config_.gripper_topic =
+      auto_declare<std::string>("external.gripper_topic", "/gripper_control");
+    external_config_.pan_tilt_topic =
+      auto_declare<std::string>("external.pan_tilt_topic", "/RealsensePanTilt");
+    external_config_.status_topic =
+      auto_declare<std::string>("external.status_topic", "/motor_status");
+    external_config_.gripper_id =
+      static_cast<int>(auto_declare<std::int64_t>("external.gripper_id", 6));
+    external_config_.tilt_id = static_cast<int>(auto_declare<std::int64_t>("external.tilt_id", 23));
+    external_config_.status_rate_hz = auto_declare<double>("external.status_rate_hz", 50.0);
     dry_run_policy_ = auto_declare<bool>("dry_run_policy", false);
     policy_path_ = auto_declare<std::string>("policy_path", "");
-
-    gamepad_enabled_ = auto_declare<bool>("gamepad.enabled", true);
-    gamepad_config_.device_path = auto_declare<std::string>("gamepad.device_path", "");
-    gamepad_config_.name_hint =
-      auto_declare<std::string>("gamepad.name_hint", "Gulikit X");
-    const auto gamepad_vendor_id = auto_declare<std::int64_t>("gamepad.vendor_id", 0x045e);
-    const auto gamepad_product_id = auto_declare<std::int64_t>("gamepad.product_id", 0x028e);
-    if (gamepad_vendor_id < 0 || gamepad_vendor_id > 0xffff ||
-      gamepad_product_id < 0 || gamepad_product_id > 0xffff)
-    {
-      throw std::invalid_argument("gamepad vendor_id/product_id must fit in 16 bits");
-    }
-    gamepad_config_.vendor_id = static_cast<std::uint16_t>(gamepad_vendor_id);
-    gamepad_config_.product_id = static_cast<std::uint16_t>(gamepad_product_id);
-    gamepad_config_.max_vx = auto_declare<double>("gamepad.max_vx", 0.4);
-    gamepad_config_.max_vy = auto_declare<double>("gamepad.max_vy", 0.3);
-    gamepad_config_.max_wz = auto_declare<double>("gamepad.max_wz", 0.7);
-    gamepad_config_.deadband_vx = auto_declare<double>("gamepad.deadband_vx", 0.05);
-    gamepad_config_.deadband_vy = auto_declare<double>("gamepad.deadband_vy", 0.05);
-    gamepad_config_.deadband_wz = auto_declare<double>("gamepad.deadband_wz", 0.05);
 
     imu_enabled_ = auto_declare<bool>("imu.enabled", false);
     imu_config_.port = auto_declare<std::string>("imu.port", "");
@@ -176,6 +189,19 @@ const
   for (const auto & joint : joints_) {
     config.names.push_back(joint + "/" + hardware_interface::HW_IF_POSITION);
   }
+  // 정책과 무관한 고정 관절은 정책 관절 뒤에 붙는다.
+  for (const auto & joint : hold_joints_) {
+    config.names.push_back(joint + "/" + hardware_interface::HW_IF_POSITION);
+  }
+  // 모션 P gain: 같은 순서로 <관절>_dxl/Position P Gain (configure_gains() 가 켰을 때만).
+  if (gain_interfaces_) {
+    for (const auto & joint : joints_) {
+      config.names.push_back(joint + ExternalCommands::kGpioSuffix + "/" + kGainInterface);
+    }
+    for (const auto & joint : hold_joints_) {
+      config.names.push_back(joint + ExternalCommands::kGpioSuffix + "/" + kGainInterface);
+    }
+  }
   return config;
 }
 
@@ -200,6 +226,11 @@ controller_interface::InterfaceConfiguration KidRlController::state_interface_co
   bus_timing_monitor_.append_interface_names(config.names);
   // xacro 가 전압·PWM 을 선언한 관절마다 2개가 더 붙는다.
   motor_telemetry_monitor_.append_interface_names(joints_, config.names);
+  // 고정 관절은 위치·속도만 읽는다(활성화 때 출발점, /motor_status). 관측에는 들어가지 않는다.
+  for (const auto & joint : hold_joints_) {
+    config.names.push_back(joint + "/" + hardware_interface::HW_IF_POSITION);
+    config.names.push_back(joint + "/" + hardware_interface::HW_IF_VELOCITY);
+  }
   return config;
 }
 
@@ -233,7 +264,10 @@ controller_interface::CallbackReturn KidRlController::on_configure(const rclcpp_
     !std::isfinite(fall_debounce_s_) || !std::isfinite(entry_position_tolerance_) ||
     !std::isfinite(fault_recovery_s_) ||
     policy_rate_hz_ <= 0.0 || ready_pose_duration_s_ <= 0.0 ||
-    command_timeout_s_ <= 0.0 || imu_timeout_s_ <= 0.0 || action_scale_ < 0.0 ||
+    command_timeout_s_ <= 0.0 || imu_timeout_s_ <= 0.0 ||
+    !std::isfinite(auto_hold_gyro_threshold_) || auto_hold_gyro_threshold_ <= 0.0 ||
+    !std::isfinite(auto_hold_settle_s_) || auto_hold_settle_s_ < 0.0 || action_scale_ < 0.0 ||
+    !std::isfinite(walk_state_rate_hz_) || walk_state_rate_hz_ <= 0.0 ||
     target_rate_limit_ <= 0.0 || fall_debounce_s_ < 0.0 ||
     entry_position_tolerance_ < 0.0 ||
     fall_gravity_z_threshold_ < -1.0 || fall_gravity_z_threshold_ > 1.0)
@@ -261,19 +295,37 @@ controller_interface::CallbackReturn KidRlController::on_configure(const rclcpp_
     }
     fixed_target_[static_cast<std::size_t>(it - joints_.begin())] = true;
   }
-  if (!std::isfinite(gamepad_config_.max_vx) || !std::isfinite(gamepad_config_.max_vy) ||
-    !std::isfinite(gamepad_config_.max_wz) || gamepad_config_.max_vx <= 0.0 ||
-    gamepad_config_.max_vy <= 0.0 || gamepad_config_.max_wz <= 0.0 ||
-    !std::isfinite(gamepad_config_.deadband_vx) || gamepad_config_.deadband_vx < 0.0 ||
-    !std::isfinite(gamepad_config_.deadband_vy) || gamepad_config_.deadband_vy < 0.0 ||
-    !std::isfinite(gamepad_config_.deadband_wz) || gamepad_config_.deadband_wz < 0.0 ||
-    gamepad_config_.deadband_vx >= 1.0 || gamepad_config_.deadband_vy >= 1.0 ||
-    gamepad_config_.deadband_wz >= 1.0 ||
+  {
+    const std::set<std::string> hold_set(hold_joints_.begin(), hold_joints_.end());
+    const bool hold_overlaps = std::any_of(
+      hold_joints_.begin(), hold_joints_.end(), [this](const std::string & name) {
+        return name.empty() || std::find(joints_.begin(), joints_.end(), name) != joints_.end();
+      });
+    if (hold_positions_.size() != hold_joints_.size() || hold_set.size() != hold_joints_.size() ||
+      hold_overlaps || !is_finite_vector(hold_positions_) ||
+      !std::isfinite(hold_rate_limit_) || hold_rate_limit_ <= 0.0)
+    {
+      RCLCPP_ERROR(
+        get_node()->get_logger(),
+        "hold_joints/hold_positions must have equal size, unique names not in 'joints', "
+        "finite positions and hold_rate_limit > 0");
+      return CallbackReturn::ERROR;
+    }
+    hold_targets_.assign(hold_joints_.size(), 0.0);
+    hold_measured_.assign(hold_joints_.size(), 0.0);
+    hold_velocities_.assign(hold_joints_.size(), 0.0);
+    hold_position_state_index_.assign(hold_joints_.size(), 0);
+    hold_velocity_state_index_.assign(hold_joints_.size(), 0);
+    hold_command_index_.assign(hold_joints_.size(), 0);
+  }
+  if (std::any_of(
+      walk_command_max_.begin(), walk_command_max_.end(),
+      [](double v) {return !std::isfinite(v) || v <= 0.0;}) ||
     !std::isfinite(imu_config_.angle_scale) || !std::isfinite(imu_config_.gyro_scale) ||
     imu_config_.angle_scale <= 0.0 || imu_config_.gyro_scale <= 0.0 ||
     (imu_enabled_ && imu_config_.port.empty()))
   {
-    RCLCPP_ERROR(get_node()->get_logger(), "Invalid gamepad or IMU parameters");
+    RCLCPP_ERROR(get_node()->get_logger(), "Invalid walk_command.max_* or IMU parameters");
     return CallbackReturn::ERROR;
   }
   const bool has_empty_joint = std::any_of(
@@ -389,6 +441,77 @@ controller_interface::CallbackReturn KidRlController::on_configure(const rclcpp_
   policy_enable_subscription_ = get_node()->create_subscription<std_msgs::msg::Bool>(
     "~/enable_policy", 1,
     std::bind(&KidRlController::policy_enable_callback, this, std::placeholders::_1));
+  walk_command_buffer_.writeFromNonRT(CommandSample{});
+  if (!walk_command_topic_.empty()) {
+    walk_command_subscription_ =
+      get_node()->create_subscription<geometry_msgs::msg::TwistStamped>(
+      walk_command_topic_, rclcpp::QoS(1),
+      std::bind(&KidRlController::walk_command_callback, this, std::placeholders::_1));
+  }
+
+  {
+    const std::size_t slots = joints_.size() + hold_joints_.size();
+    external_applied_seq_.assign(slots, 0);
+    external_latched_.assign(slots, false);
+    external_goal_.assign(slots, 0.0);
+    external_velocity_.assign(slots, 0.0);
+    external_acceleration_.assign(slots, 0.0);
+    external_speed_.assign(slots, 0.0);
+    tilt_hold_index_ = -1;
+    hold_release_.assign(hold_joints_.size(), true);
+    if (external_enabled_) {
+      std::vector<std::string> slot_names(joints_);
+      slot_names.insert(slot_names.end(), hold_joints_.begin(), hold_joints_.end());
+      // 그리퍼·tilt 는 정책 관절이면 안 된다(정책이 도는 동안 명령을 버리게 된다).
+      if (!external_.configure(get_node(), external_config_, get_robot_description(), slot_names)) {
+        policy_runner_.reset();
+        policy_enable_subscription_.reset();
+        walk_command_subscription_.reset();
+        return CallbackReturn::ERROR;
+      }
+      const int gripper_slot = external_.slot_of(external_config_.gripper_id);
+      const int tilt_slot = external_.slot_of(external_config_.tilt_id);
+      if ((gripper_slot >= 0 && static_cast<std::size_t>(gripper_slot) < joints_.size()) ||
+        (tilt_slot >= 0 && static_cast<std::size_t>(tilt_slot) < joints_.size()))
+      {
+        RCLCPP_ERROR(
+          get_node()->get_logger(),
+          "external.gripper_id / external.tilt_id must be hold_joints, not policy joints");
+        external_.reset();
+        policy_runner_.reset();
+        policy_enable_subscription_.reset();
+        walk_command_subscription_.reset();
+        return CallbackReturn::ERROR;
+      }
+      // tilt 는 pan_tilt 토픽이 유일한 명령 경로다. 고정 자세(hold_positions)로 끌고 가지 않는다.
+      if (!external_config_.pan_tilt_topic.empty() && tilt_slot >= 0) {
+        tilt_hold_index_ = tilt_slot - static_cast<int>(joints_.size());
+      }
+      // 그리퍼와 tilt 는 정책이 켜져도 외부 명령을 놓지 않는다.
+      for (const int slot : {gripper_slot, tilt_slot}) {
+        if (slot >= static_cast<int>(joints_.size())) {
+          hold_release_[static_cast<std::size_t>(slot) - joints_.size()] = false;
+        }
+      }
+    }
+  }
+
+  if (!configure_gains()) {
+    external_.reset();
+    policy_runner_.reset();
+    policy_enable_subscription_.reset();
+    walk_command_subscription_.reset();
+    return CallbackReturn::ERROR;
+  }
+
+  if (!walk_state_topic_.empty()) {
+    // 늦게 뜬 task planner 도 마지막 값을 바로 받도록 transient_local.
+    walk_state_publisher_ = get_node()->create_publisher<std_msgs::msg::Bool>(
+      walk_state_topic_, rclcpp::QoS(1).reliable().transient_local());
+    walk_state_rt_publisher_ =
+      std::make_unique<realtime_tools::RealtimePublisher<std_msgs::msg::Bool>>(
+      walk_state_publisher_);
+  }
 
   if (dry_run_policy_) {
     RCLCPP_WARN(
@@ -410,10 +533,13 @@ controller_interface::CallbackReturn KidRlController::on_cleanup(const rclcpp_li
   // Mirror of on_configure(): release the input devices and the subscription so
   // a reconfigure starts from a clean slate. Only reachable from `inactive`, so
   // the RT loop is stopped and tearing down the device threads here is safe.
-  gamepad_.stop();
   imu_.stop();
   policy_runner_.reset();
   policy_enable_subscription_.reset();
+  walk_command_subscription_.reset();
+  walk_state_rt_publisher_.reset();
+  walk_state_publisher_.reset();
+  external_.reset();
   mode_ = Mode::WAITING_FOR_STATE;
   return CallbackReturn::SUCCESS;
 }
@@ -465,6 +591,32 @@ bool KidRlController::map_interfaces()
       return false;
     }
   }
+  for (std::size_t i = 0; i < hold_joints_.size(); ++i) {
+    if (!find(
+        state_interfaces_, "state", hold_joints_[i],
+        hardware_interface::HW_IF_POSITION, hold_position_state_index_[i]) ||
+      !find(
+        state_interfaces_, "state", hold_joints_[i],
+        hardware_interface::HW_IF_VELOCITY, hold_velocity_state_index_[i]) ||
+      !find(
+        command_interfaces_, "command", hold_joints_[i],
+        hardware_interface::HW_IF_POSITION, hold_command_index_[i]))
+    {
+      return false;
+    }
+  }
+  if (gain_interfaces_) {
+    for (std::size_t k = 0; k < gain_command_index_.size(); ++k) {
+      const std::string & joint =
+        k < joints_.size() ? joints_[k] : hold_joints_[k - joints_.size()];
+      if (!find(
+          command_interfaces_, "command", joint + ExternalCommands::kGpioSuffix,
+          kGainInterface, gain_command_index_[k]))
+      {
+        return false;
+      }
+    }
+  }
   return true;
 }
 
@@ -474,19 +626,20 @@ controller_interface::CallbackReturn KidRlController::on_activate(const rclcpp_l
   // starting state. Every piece of carried-over state is cleared here -- the
   // actions, the observation, all three time accumulators -- so a
   // deactivate/activate cycle can never feed the policy data from the previous
-  // run. A missing gamepad only warns (the command degrades to zero velocity,
-  // which the policy was trained on); a missing IMU is fatal, since projected
-  // gravity has no safe substitute.
+  // run. A missing IMU is fatal, since projected gravity has no safe substitute.
   const std::size_t expected_state_interfaces =
     (3 + rx_missing_monitor_.interfaces_per_joint()) * joints_.size() +
-    bus_timing_monitor_.interface_count() + motor_telemetry_monitor_.interface_count();
-  if (command_interfaces_.size() != joints_.size() ||
+    bus_timing_monitor_.interface_count() + motor_telemetry_monitor_.interface_count() +
+    2 * hold_joints_.size();
+  const std::size_t expected_command_interfaces =
+    (joints_.size() + hold_joints_.size()) * (gain_interfaces_ ? 2 : 1);
+  if (command_interfaces_.size() != expected_command_interfaces ||
     state_interfaces_.size() != expected_state_interfaces)
   {
     RCLCPP_ERROR(
       get_node()->get_logger(),
       "Interface count mismatch: %zu command (expected %zu), %zu state (expected %zu)",
-      command_interfaces_.size(), joints_.size(), state_interfaces_.size(),
+      command_interfaces_.size(), expected_command_interfaces, state_interfaces_.size(),
       expected_state_interfaces);
     return CallbackReturn::ERROR;
   }
@@ -495,20 +648,14 @@ controller_interface::CallbackReturn KidRlController::on_activate(const rclcpp_l
     !rx_missing_monitor_.map(state_interfaces_, joints_, get_node()->get_logger()) ||
     !bus_timing_monitor_.map(state_interfaces_, get_node()->get_logger()) ||
     !motor_telemetry_monitor_.map(state_interfaces_, joints_, get_node()->get_logger()) ||
-    !read_joint_state() || !hardware_state_ok())
+    !read_joint_state() || !hardware_state_ok() || !read_hold_positions(hold_targets_))
   {
     RCLCPP_ERROR(get_node()->get_logger(), "Could not read a valid joint state at activation");
     return CallbackReturn::ERROR;
   }
 
   std::string input_error;
-  if (gamepad_enabled_ && !gamepad_.start(gamepad_config_, input_error)) {
-    RCLCPP_WARN(
-      get_node()->get_logger(), "Gamepad is unavailable; velocity command stays zero: %s",
-      input_error.c_str());
-  }
   if (imu_enabled_ && !imu_.start(imu_config_, input_error)) {
-    gamepad_.stop();
     RCLCPP_ERROR(get_node()->get_logger(), "Could not start IMU: %s", input_error.c_str());
     return CallbackReturn::ERROR;
   }
@@ -538,12 +685,40 @@ controller_interface::CallbackReturn KidRlController::on_activate(const rclcpp_l
 
   activation_positions_ = positions_;
   targets_ = positions_;
+  // 고정 관절은 측정 자세에서 출발해 hold_rate_limit 으로 hold_positions 까지 간다.
+  last_dt_s_ = 0.0;
+  hold_measured_ = hold_targets_;
+  std::fill(hold_velocities_.begin(), hold_velocities_.end(), 0.0);
+  // 활성화 전에 와 있던 외부 명령은 따르지 않는다(이미 처리한 것으로 표시).
+  std::fill(external_latched_.begin(), external_latched_.end(), false);
+  std::fill(external_speed_.begin(), external_speed_.end(), 0.0);
+  if (external_enabled_) {
+    const auto & pending = external_.read_from_rt();
+    for (std::size_t k = 0; k < pending.size(); ++k) {external_applied_seq_[k] = pending[k].seq;}
+  }
+  for (std::size_t i = 0; i < hold_joints_.size(); ++i) {
+    if (static_cast<int>(i) == tilt_hold_index_) {
+      RCLCPP_INFO(
+        get_node()->get_logger(),
+        "hold joint '%s': measured %+.3f rad, held until a pan_tilt command arrives",
+        hold_joints_[i].c_str(), hold_targets_[i]);
+      continue;
+    }
+    RCLCPP_INFO(
+      get_node()->get_logger(), "hold joint '%s': measured %+.3f rad -> target %+.3f rad",
+      hold_joints_[i].c_str(), hold_targets_[i], hold_positions_[i]);
+  }
   std::fill(actions_.begin(), actions_.end(), 0.0);
   std::fill(last_actions_.begin(), last_actions_.end(), 0.0);
   std::fill(observation_.begin(), observation_.end(), 0.0);
   action_clip_warned_ = false;
   gait_clock_.restart();
   ready_pose_elapsed_s_ = 0.0;
+  auto_hold_timer_s_ = 0.0;
+  auto_disabled_.store(false, std::memory_order_relaxed);
+  walk_state_accumulator_s_ = 0.0;
+  walk_state_last_ = -1;
+  trained_gain_ticks_ = 0;
   policy_accumulator_s_ = 0.0;
   fall_timer_s_ = 0.0;
   fault_clear_s_ = 0.0;
@@ -559,7 +734,6 @@ controller_interface::CallbackReturn KidRlController::on_deactivate(const rclcpp
   // targets are deliberately left alone: ros2_control stops calling update()
   // on deactivation, so whatever holds the joints afterwards is outside this
   // controller's authority.
-  gamepad_.stop();
   imu_.stop();
   // 남은 샘플을 모두 파일에 쓰고 닫는다. 이걸 빼먹으면 마지막 몇 초, 즉 보통
   // 가장 보고 싶은 구간이 사라진다.
@@ -570,6 +744,12 @@ controller_interface::CallbackReturn KidRlController::on_deactivate(const rclcpp
     RCLCPP_INFO(
       get_node()->get_logger(), "CSV log closed: %s%s", path.c_str(),
       dropped > 0 ? " (buffer overflowed; some samples were dropped)" : "");
+  }
+  // 컨트롤러가 멈추면 다리를 맡을 쪽이 없다. task planner 가 정지로 믿고 있지 않게 내린다.
+  if (walk_state_publisher_) {
+    std_msgs::msg::Bool stopped;
+    stopped.data = false;
+    walk_state_publisher_->publish(stopped);
   }
   mode_ = Mode::WAITING_FOR_STATE;
   return CallbackReturn::SUCCESS;
@@ -582,8 +762,53 @@ void KidRlController::policy_enable_callback(std_msgs::msg::Bool::SharedPtr msg)
   // publishes one complete true/false value without a data race or allocation.
   // The flag is latched, so a dropped message leaves the previous state intact.
   policy_enabled_.store(msg->data, std::memory_order_relaxed);
+  // 사람이 직접 정한 값이 우선한다: 자동 정지 뒤 토픽 명령으로 다시 켜는 것을 막는다.
+  auto_disabled_.store(false, std::memory_order_relaxed);
   RCLCPP_INFO(
     get_node()->get_logger(), "enable_policy received: %s", msg->data ? "true" : "false");
+}
+
+void KidRlController::walk_command_callback(geometry_msgs::msg::TwistStamped::SharedPtr msg)
+{
+  // 비실시간 executor 스레드. walk_command.max_* 범위로 잘라 RealtimeBuffer 에 넣는다.
+  // 버린 메시지는 이전 명령을 바꾸지 않으므로 command_timeout_s 뒤 0 으로 떨어진다.
+  // 정지는 속도 0 을 보내면 된다(정책이 균형을 잡으며 선다). 정책을 끄는
+  // ~/enable_policy=false 는 그 틱에 정책을 끊고 default 자세로 끌고 가므로 정지 용도가 아니다.
+  if (msg == nullptr) {return;}
+  const auto & twist = msg->twist;
+  const char * reason = nullptr;
+  // stamp 는 보낸 쪽 시각(ROS 시간). 0 이면 나이를 알 수 없고, 미래면 시계가 어긋난 것이다.
+  constexpr double kFutureToleranceS = 0.05;
+  const rclcpp::Time now = get_node()->get_clock()->now();
+  const rclcpp::Time stamp(msg->header.stamp, now.get_clock_type());
+  const double age_s = (now - stamp).seconds();
+  if (!std::isfinite(twist.linear.x) || !std::isfinite(twist.linear.y) ||
+    !std::isfinite(twist.angular.z))
+  {
+    reason = "non-finite velocity";
+  } else if (stamp.nanoseconds() == 0) {
+    reason = "header.stamp is zero";
+  } else if (age_s < -kFutureToleranceS) {
+    reason = "header.stamp is in the future";
+  } else if (age_s > command_timeout_s_) {
+    reason = "header.stamp is older than command_timeout_s";
+  }
+  if (reason != nullptr) {
+    RCLCPP_WARN_THROTTLE(
+      get_node()->get_logger(), *get_node()->get_clock(), 1000,
+      "Dropped %s: %s", walk_command_topic_.c_str(), reason);
+    return;
+  }
+  CommandSample sample;
+  // 학습 범위 밖으로 나가지 않게 walk_command.max_* 로 자른다. linear.z, angular.x/y 는 쓰지 않는다.
+  sample.velocity = {
+    clamp(twist.linear.x, -walk_command_max_[0], walk_command_max_[0]),
+    clamp(twist.linear.y, -walk_command_max_[1], walk_command_max_[1]),
+    clamp(twist.angular.z, -walk_command_max_[2], walk_command_max_[2])};
+  // 나이는 update() 의 정상 시계 기준으로 옮긴다: 전송 지연만큼 이미 늙은 샘플이다.
+  sample.stamp_ns = steady_time_nanoseconds() - to_nanoseconds(std::max(age_s, 0.0));
+  sample.valid = true;
+  walk_command_buffer_.writeFromNonRT(sample);
 }
 
 bool KidRlController::read_joint_state()
@@ -919,16 +1144,170 @@ bool KidRlController::write_commands()
 {
   // Single choke point: nothing reaches the hardware without a finiteness check
   // and a joint-limit clamp, whatever mode produced the target.
+  // 학습 범위(joint_position_min/max)는 정책이 도는 동안에만 건다. 그 밖의 모드(모션·매니가
+  // 다리를 움직이는 SAFE_HOLD, 기동 보간, FAULT)는 Goal Position 이 버려지지 않는 서보 범위만
+  // 건다: 모션 파일은 학습 범위 밖(허들 무릎 2.09 rad 등)을 쓰고, 예전 colcon 드라이버도 자르지
+  // 않았다. Drive Mode 반전 관절도 들어가도록 대칭으로 자른다. 정책 진입은 default 자세 근처에서만
+  // 일어나므로 범위가 바뀌는 순간 목표가 튀지 않는다.
+  const bool policy_running = mode_ == Mode::POLICY_RUNNING;
   for (std::size_t i = 0; i < joints_.size(); ++i) {
     if (!std::isfinite(targets_[i])) {
       RCLCPP_ERROR(
         get_node()->get_logger(), "Non-finite target for joint '%s'", joints_[i].c_str());
       return false;
     }
-    targets_[i] = clamp(targets_[i], joint_position_min_[i], joint_position_max_[i]);
+    targets_[i] = policy_running ?
+      clamp(targets_[i], joint_position_min_[i], joint_position_max_[i]) :
+      clamp(targets_[i], -kMaxGoalPositionRad, kMaxGoalPositionRad);
     if (!command_interfaces_[position_command_index_[i]].set_value(targets_[i])) {
       RCLCPP_ERROR(
         get_node()->get_logger(), "Could not write command for joint '%s'", joints_[i].c_str());
+      return false;
+    }
+  }
+  return write_hold_commands();
+}
+
+bool KidRlController::read_hold_positions(std::vector<double> & out)
+{
+  for (std::size_t i = 0; i < hold_joints_.size(); ++i) {
+    const auto position = state_interfaces_[hold_position_state_index_[i]].get_optional();
+    if (!position || !std::isfinite(*position)) {
+      RCLCPP_ERROR(
+        get_node()->get_logger(), "hold joint '%s' has no valid position",
+        hold_joints_[i].c_str());
+      return false;
+    }
+    out[i] = *position;
+  }
+  return true;
+}
+
+void KidRlController::read_hold_state()
+{
+  // /motor_status 용. 하나가 빠져도 그 관절만 마지막 값을 유지한다(제어에는 쓰지 않는다).
+  for (std::size_t i = 0; i < hold_joints_.size(); ++i) {
+    const auto position = state_interfaces_[hold_position_state_index_[i]].get_optional();
+    const auto velocity = state_interfaces_[hold_velocity_state_index_[i]].get_optional();
+    if (position && std::isfinite(*position)) {hold_measured_[i] = *position;}
+    if (velocity && std::isfinite(*velocity)) {hold_velocities_[i] = *velocity;}
+  }
+}
+
+double KidRlController::profile_step(
+  double target, double goal, double velocity, double acceleration, double dt, double & speed)
+{
+  // Dynamixel 의 velocity-based profile 을 제어 주기 단위로 흉내 낸다. 서보 쪽 Profile
+  // Velocity/Acceleration 레지스터는 다리 학습 조건(0 = 프로파일 없음)을 지키려고 쓰지 않는다.
+  //   velocity 0     -> 속도 제한 없음 (서보 레지스터 0 과 같은 뜻)
+  //   acceleration 0 -> 가속 제한 없음. 0 보다 크면 가속하고, 남은 거리로 감속해 멈춘다.
+  const double distance = goal - target;
+  if (distance == 0.0 || dt <= 0.0) {
+    speed = 0.0;
+    return target;
+  }
+  if (velocity <= 0.0 && acceleration <= 0.0) {
+    speed = 0.0;
+    return goal;
+  }
+  double limit = velocity > 0.0 ? velocity : std::numeric_limits<double>::infinity();
+  if (acceleration > 0.0) {
+    limit = std::min(limit, std::sqrt(2.0 * acceleration * std::abs(distance)));
+    speed = std::min(speed + acceleration * dt, limit);
+  } else {
+    speed = limit;
+  }
+  const double step = speed * dt;
+  if (!std::isfinite(step) || step >= std::abs(distance)) {
+    speed = 0.0;
+    return goal;
+  }
+  return target + std::copysign(step, distance);
+}
+
+void KidRlController::process_external_commands(bool policy_requested)
+{
+  if (!external_enabled_) {return;}
+  const auto & commands = external_.read_from_rt();
+  const std::size_t policy_count = joints_.size();
+  // 정책 관절에 외부 명령을 따를 수 있는 유일한 상태: 정책이 꺼져 있고 SAFE_HOLD.
+  // 그 밖의 상태가 되면 걸어 둔 다리 명령을 놓는다 -> SAFE_HOLD 가 default 로 되돌린다.
+  const bool legs_free = external_accept_policy_joints_ && mode_ == Mode::SAFE_HOLD &&
+    !policy_requested;
+  if (!legs_free) {
+    for (std::size_t k = 0; k < policy_count; ++k) {external_latched_[k] = false;}
+  }
+  // 정책이 요청되면 팔·허리(hold_release_)도 외부 명령을 놓는다. 모션·매니가 끝난 자세가 아니라
+  // 학습한 상체 자세(hold_positions)로 걷도록, 걷는 동안 hold_rate_limit 으로 되돌아간다.
+  if (policy_requested) {
+    for (std::size_t i = 0; i < hold_release_.size(); ++i) {
+      if (hold_release_[i]) {external_latched_[policy_count + i] = false;}
+    }
+  }
+  // FAULT/WAITING_FOR_STATE 에서는 새 명령을 아예 받지 않는다(걸려 있던 상체 명령은 유지).
+  const bool accept_any = mode_ != Mode::FAULT && mode_ != Mode::WAITING_FOR_STATE;
+  std::size_t ignored_policy = 0, ignored_hold = 0;
+  for (std::size_t k = 0; k < commands.size(); ++k) {
+    const auto & command = commands[k];
+    if (command.seq == external_applied_seq_[k]) {continue;}
+    external_applied_seq_[k] = command.seq;
+    const bool released_hold =
+      k >= policy_count && policy_requested && hold_release_[k - policy_count];
+    if (!accept_any || (k < policy_count && !legs_free) || released_hold) {
+      if (k < policy_count) {++ignored_policy;}
+      if (released_hold) {++ignored_hold;}
+      continue;
+    }
+    if (!external_latched_[k] ||
+      (command.goal - external_goal_[k]) * (external_goal_[k] - (k < policy_count ?
+      targets_[k] : hold_targets_[k - policy_count])) < 0.0)
+    {
+      // 새로 걸거나 방향이 바뀌면 프로파일 속도를 0 에서 다시 시작한다.
+      external_speed_[k] = 0.0;
+    }
+    external_latched_[k] = true;
+    external_goal_[k] = command.goal;
+    external_velocity_[k] = command.velocity;
+    external_acceleration_[k] = command.acceleration;
+  }
+  if (ignored_policy > 0) {
+    RCLCPP_WARN_THROTTLE(
+      get_node()->get_logger(), *get_node()->get_clock(), 2000,
+      "Ignored external commands for %zu policy joint(s): legs follow external commands only in "
+      "SAFE_HOLD with enable_policy=false (mode %s)", ignored_policy, mode_name(mode_));
+  }
+  if (ignored_hold > 0) {
+    RCLCPP_WARN_THROTTLE(
+      get_node()->get_logger(), *get_node()->get_clock(), 2000,
+      "Ignored external commands for %zu arm/torso joint(s): with enable_policy=true they hold "
+      "hold_positions (gripper and tilt still follow external commands)", ignored_hold);
+  }
+}
+
+bool KidRlController::write_hold_commands()
+{
+  // 모드와 무관하게 매 틱: 외부 명령(그리퍼, 팔, tilt ...)이 걸려 있으면 그 프로파일로,
+  // 아니면 hold_positions 쪽으로 hold_rate_limit 만큼 옮기고 보낸다. tilt 는 예외로
+  // hold_positions 를 쓰지 않는다: 명령 전에는 활성화 때 측정 자세를 그대로 유지한다.
+  const double max_delta = hold_rate_limit_ * last_dt_s_;
+  for (std::size_t i = 0; i < hold_joints_.size(); ++i) {
+    const std::size_t k = joints_.size() + i;
+    if (external_latched_[k]) {
+      hold_targets_[i] = profile_step(
+        hold_targets_[i], external_goal_[k], external_velocity_[k], external_acceleration_[k],
+        last_dt_s_, external_speed_[k]);
+    } else if (static_cast<int>(i) != tilt_hold_index_) {
+      hold_targets_[i] += clamp(hold_positions_[i] - hold_targets_[i], -max_delta, max_delta);
+    }
+    // Goal Position 변환(tick = (rad + pi) / 0.00153...)에 클램프가 없어 0..4095 를 벗어난
+    // 명령은 조용히 버려진다(controllers.yaml joint_position_max 주석). 그 안으로 자른다.
+    hold_targets_[i] = clamp(hold_targets_[i], -kPi, kMaxGoalPositionRad);
+    if (!std::isfinite(hold_targets_[i]) ||
+      !command_interfaces_[hold_command_index_[i]].set_value(hold_targets_[i]))
+    {
+      RCLCPP_ERROR(
+        get_node()->get_logger(), "Could not write command for hold joint '%s'",
+        hold_joints_[i].c_str());
       return false;
     }
   }
@@ -936,7 +1315,7 @@ bool KidRlController::write_commands()
 }
 
 controller_interface::return_type KidRlController::update(
-  const rclcpp::Time &, const rclcpp::Duration & period)
+  const rclcpp::Time & time, const rclcpp::Duration & period)
 {
   // The RT tick, at the controller_manager rate (target 200 Hz), and the only
   // place the mode machine advances. Shape:
@@ -951,6 +1330,8 @@ controller_interface::return_type KidRlController::update(
   // POLICY_RUNNING. The remaining ticks are not idle: they refresh the joint
   // state, run the watchdogs and the fall debounce at full resolution, and
   // hold the standing target (zero-order hold).
+  // 고정 관절 경사(write_hold_commands)용. 아래 overrun 가드와 같은 상한으로 자른다.
+  last_dt_s_ = clamp(period.seconds(), 0.0, kMaxIntegrationPeriodS);
   if (!read_joint_state()) {
     // A missing sample is not a controller fault. Keep the last finite target,
     // leave Dynamixel torque enabled, and retry the complete snapshot on the
@@ -1004,11 +1385,11 @@ controller_interface::return_type KidRlController::update(
   // negative max_delta would invert every rate limit.
   const double dt = clamp(period.seconds(), 0.0, kMaxIntegrationPeriodS);
 
-  // Gamepad and IMU snapshots come from their RealtimeBuffers. The enable flag
-  // is a single independent bool, so an atomic load is sufficient.
-  CommandSample command = gamepad_.read_from_rt();
+  // Walk-topic and IMU snapshots come from their RealtimeBuffers. The
+  // enable flag is a single independent bool, so an atomic load is sufficient.
+  const CommandSample * walk_command = walk_command_buffer_.readFromRT();
   ImuSample imu = imu_.read_from_rt();
-  const bool policy_requested = policy_enabled_.load(std::memory_order_relaxed);
+  bool policy_requested = policy_enabled_.load(std::memory_order_relaxed);
 
   // 반드시 샘플을 읽은 '뒤에' 시각을 잡는다. 예전에는 now_ns 를 먼저 잡았는데,
   // 그 사이(수 us)에 IMU 스레드가 새 샘플을 찍어 넣으면 stamp_ns > now_ns 가 되어
@@ -1019,9 +1400,29 @@ controller_interface::return_type KidRlController::update(
   // 읽은 뒤에 잡으면 스탬프는 항상 now_ns 이전이므로 이 경합이 사라진다.
   const std::int64_t now_ns = steady_time_nanoseconds();
 
-  const bool command_fresh = command.valid &&
-    now_ns - command.stamp_ns >= 0 &&
-    now_ns - command.stamp_ns <= to_nanoseconds(command_timeout_s_);
+  const auto is_fresh = [&](const CommandSample & sample) {
+      return sample.valid && now_ns - sample.stamp_ns >= 0 &&
+             now_ns - sample.stamp_ns <= to_nanoseconds(command_timeout_s_);
+    };
+  // 속도 명령 입력원은 walk_command.topic(TwistStamped) 하나다. 오래됐으면 아래에서 0 이 된다.
+  CommandSample command = walk_command != nullptr ? *walk_command : CommandSample{};
+  const bool command_fresh = is_fresh(command);
+  const bool command_nonzero = command_fresh && std::any_of(
+    command.velocity.begin(), command.velocity.end(), [](double v) {return v != 0.0;});
+  // 자동 정지 조건의 첫 절반: task planner 가 (0, 0, 0) 을 보내고 있다. 명령이 끊긴 것은
+  // 여기에 들지 않는다.
+  const bool walk_stop_requested = command_fresh && !command_nonzero;
+  // 자동 정지가 내린 enable_policy 는 task planner 가 다시 걸으라고 하면 올린다.
+  if (command_nonzero && !policy_requested &&
+    auto_disabled_.exchange(false, std::memory_order_relaxed))
+  {
+    policy_enabled_.store(true, std::memory_order_relaxed);
+    policy_requested = true;
+    RCLCPP_INFO(
+      get_node()->get_logger(),
+      "non-zero %s command after auto hold: enable_policy=true", walk_command_topic_.c_str());
+  }
+
   const bool imu_fresh = imu.valid &&
     now_ns - imu.stamp_ns >= 0 &&
     now_ns - imu.stamp_ns <= to_nanoseconds(imu_timeout_s_);
@@ -1040,6 +1441,9 @@ controller_interface::return_type KidRlController::update(
   // policy was trained on. A stale IMU has no safe substitute and trips the
   // watchdog instead.
   if (!command_fresh) {command.velocity = {0.0, 0.0, 0.0};}
+
+  // 외부 노드의 새 모터 명령을 이번 모드 기준으로 받아들이거나 버린다.
+  process_external_commands(policy_requested);
 
   switch (mode_) {
     case Mode::WAITING_FOR_STATE:
@@ -1063,13 +1467,27 @@ controller_interface::return_type KidRlController::update(
         break;
       }
 
-    case Mode::SAFE_HOLD:
-      approach(default_positions_, dt);
+    case Mode::SAFE_HOLD: {
+        // 정책이 꺼져 있는 동안 motion_operator 등이 보낸 다리 명령(걸려 있는 관절만)은 그
+        // 프로파일로 따르고, 나머지는 target_rate_limit 으로 default 자세에 간다.
+        const double max_delta = target_rate_limit_ * dt;
+        for (std::size_t i = 0; i < joints_.size(); ++i) {
+          if (external_latched_[i]) {
+            targets_[i] = profile_step(
+              targets_[i], external_goal_[i], external_velocity_[i], external_acceleration_[i],
+              dt, external_speed_[i]);
+          } else {
+            targets_[i] += clamp(default_positions_[i] - targets_[i], -max_delta, max_delta);
+          }
+        }
+      }
       if (policy_requested) {
         if (!imu_fresh) {
           RCLCPP_WARN_THROTTLE(
             get_node()->get_logger(), *get_node()->get_clock(), 2000,
             "Policy requested but the IMU is stale or invalid; staying in SAFE_HOLD");
+        } else if (gain_interfaces_ && trained_gain_ticks_ < 2) {
+          // 모션 P gain 에서 학습 gain 으로 바꾼 값이 서보에 나갈 때까지 1~2 틱 기다린다.
         } else if (!ready_to_start_policy(imu)) {
           // 두 조건을 뭉뚱그려 말하면 현장에서 무엇을 고쳐야 할지 알 수 없다.
           // 어느 쪽에 걸렸는지, 관절이면 어느 관절이 얼마나 벗어났는지 남긴다.
@@ -1138,10 +1556,33 @@ controller_interface::return_type KidRlController::update(
           break;
         }
         fall_timer_s_ = 0.0;
+        // 자동 정지 조건의 두 번째 절반: 정책이 속도 0 으로 서 있는 동안 자이로(필터 후) 흔들림이
+        // 충분히 오래 작다. enable_policy 를 false 로 내려 사람이 B 를 누른 것과 똑같이 만든다:
+        // SAFE_HOLD 가 default 자세로 천천히 옮기고 다리 외부 명령을 받는다. 다시 걷는 것은
+        // 토픽의 0 이 아닌 속도(auto_disabled_) 또는 enable_policy=true 로.
+        if (auto_hold_enabled_ && walk_stop_requested) {
+          const double gyro = std::sqrt(
+            imu.angular_velocity[0] * imu.angular_velocity[0] +
+            imu.angular_velocity[1] * imu.angular_velocity[1] +
+            imu.angular_velocity[2] * imu.angular_velocity[2]);
+          auto_hold_timer_s_ = gyro < auto_hold_gyro_threshold_ ? auto_hold_timer_s_ + dt : 0.0;
+          if (auto_hold_timer_s_ >= auto_hold_settle_s_) {
+            auto_hold_timer_s_ = 0.0;
+            policy_enabled_.store(false, std::memory_order_relaxed);
+            auto_disabled_.store(true, std::memory_order_relaxed);
+            set_mode(
+              Mode::SAFE_HOLD, "zero walk command and gyro settled (auto hold): enable_policy=false");
+            approach(default_positions_, dt);
+            break;
+          }
+        } else {
+          auto_hold_timer_s_ = 0.0;
+        }
         if (!command_fresh) {
           RCLCPP_WARN_THROTTLE(
             get_node()->get_logger(), *get_node()->get_clock(), 2000,
-            "gamepad command is stale; commanding zero velocity");
+            "velocity command (%s) is stale; commanding zero velocity",
+            walk_command_topic_.c_str());
         }
 
         policy_accumulator_s_ += dt;
@@ -1205,8 +1646,145 @@ controller_interface::return_type KidRlController::update(
   // 그때의 모드가 같은 줄에 남는다.
   log_tick(dt, command, imu, command_fresh, imu_fresh);
 
-  return write_commands() ?
-         controller_interface::return_type::OK : controller_interface::return_type::ERROR;
+  if (!write_commands() || !write_gain_commands()) {
+    return controller_interface::return_type::ERROR;
+  }
+  // /motor_status: 이번 틱에 읽은 상태. stamp 는 이 틱의 시각.
+  if (external_enabled_) {
+    read_hold_state();
+    external_.publish_status(
+      time, dt, positions_, velocities_, hold_measured_, hold_velocities_);
+  }
+  publish_walk_state(dt);
+  return controller_interface::return_type::OK;
+}
+
+bool KidRlController::configure_gains()
+{
+  // robot_description 에서 관절마다 <관절>_dxl gpio 의 Position P Gain command_interface 와
+  // 같은 이름의 param(학습 값)을 찾는다. 전부 있으면 켜고, 하나도 없으면 끄고, 일부만 있으면
+  // 설정 오류다(한 서보라도 빠지면 그 서보만 SAFE_HOLD 에서 학습 gain 으로 남는다).
+  gain_interfaces_ = false;
+  const std::size_t slots = joints_.size() + hold_joints_.size();
+  trained_gains_.assign(slots, 0.0);
+  gain_command_index_.assign(slots, 0);
+  trained_gain_ticks_ = 0;
+  if (!motion_gain_enabled_) {
+    RCLCPP_INFO(get_node()->get_logger(), "motion_gain: off (motion_gain.enabled=false)");
+    return true;
+  }
+  std::vector<hardware_interface::HardwareInfo> hardware;
+  try {
+    hardware = hardware_interface::parse_control_resources_from_urdf(get_robot_description());
+  } catch (const std::exception & error) {
+    RCLCPP_ERROR(
+      get_node()->get_logger(), "motion_gain: could not parse robot_description: %s",
+      error.what());
+    return false;
+  }
+  std::size_t found = 0;
+  for (std::size_t k = 0; k < slots; ++k) {
+    const std::string gpio_name =
+      (k < joints_.size() ? joints_[k] : hold_joints_[k - joints_.size()]) +
+      ExternalCommands::kGpioSuffix;
+    for (const auto & info : hardware) {
+      for (const auto & gpio : info.gpios) {
+        if (gpio.name != gpio_name ||
+          std::none_of(
+            gpio.command_interfaces.begin(), gpio.command_interfaces.end(),
+            [](const auto & ci) {return ci.name == kGainInterface;}))
+        {
+          continue;
+        }
+        const auto param = gpio.parameters.find(kGainInterface);
+        double value = std::numeric_limits<double>::quiet_NaN();
+        if (param != gpio.parameters.end()) {
+          try {
+            value = std::stod(param->second);
+          } catch (const std::exception &) {
+          }
+        }
+        if (!std::isfinite(value)) {
+          RCLCPP_ERROR(
+            get_node()->get_logger(),
+            "motion_gain: %s declares the %s command but has no numeric <param name=\"%s\">",
+            gpio_name.c_str(), kGainInterface, kGainInterface);
+          return false;
+        }
+        trained_gains_[k] = value;
+        ++found;
+      }
+    }
+  }
+  if (found == 0) {
+    RCLCPP_INFO(
+      get_node()->get_logger(),
+      "motion_gain: no <joint>%s/%s command interface in robot_description; P gain stays at "
+      "the xacro value", ExternalCommands::kGpioSuffix, kGainInterface);
+    return true;
+  }
+  if (found != slots) {
+    RCLCPP_ERROR(
+      get_node()->get_logger(),
+      "motion_gain: %zu of %zu joints declare the %s command interface; declare it on all or none",
+      found, slots, kGainInterface);
+    return false;
+  }
+  if (motion_gains_.size() != slots ||
+    std::any_of(
+      motion_gains_.begin(), motion_gains_.end(),
+      [](double v) {return !std::isfinite(v) || v < 0.0 || v > 16383.0;}))
+  {
+    RCLCPP_ERROR(
+      get_node()->get_logger(),
+      "motion_gain.p_gains must have %zu values (joints then hold_joints) in [0, 16383], got %zu",
+      slots, motion_gains_.size());
+    return false;
+  }
+  gain_interfaces_ = true;
+  for (std::size_t k = 0; k < slots; ++k) {
+    RCLCPP_INFO(
+      get_node()->get_logger(), "motion_gain: %s P gain %.0f (walk) / %.0f (SAFE_HOLD)",
+      (k < joints_.size() ? joints_[k] : hold_joints_[k - joints_.size()]).c_str(),
+      trained_gains_[k], motion_gains_[k]);
+  }
+  return true;
+}
+
+bool KidRlController::write_gain_commands()
+{
+  if (!gain_interfaces_) {return true;}
+  // 모션·매니가 다리 명령을 받을 수 있는 상태(SAFE_HOLD + enable_policy=false)에서만 모션 gain.
+  // 이번 틱의 모드 전이 뒤에 본다.
+  const bool motion =
+    mode_ == Mode::SAFE_HOLD && !policy_enabled_.load(std::memory_order_relaxed);
+  const auto & gains = motion ? motion_gains_ : trained_gains_;
+  for (std::size_t k = 0; k < gains.size(); ++k) {
+    if (!command_interfaces_[gain_command_index_[k]].set_value(gains[k])) {
+      RCLCPP_ERROR(get_node()->get_logger(), "Could not write %s command", kGainInterface);
+      return false;
+    }
+  }
+  trained_gain_ticks_ = motion ? 0 : std::min(trained_gain_ticks_ + 1, 1000);
+  return true;
+}
+
+void KidRlController::publish_walk_state(double dt)
+{
+  if (!walk_state_rt_publisher_) {return;}
+  // enable_policy 가 false 로 내려가 SAFE_HOLD 에 들어간 상태(자동 정지, ~/enable_policy=false 둘 다).
+  // 이번 틱의 모드 전이 뒤에 본다.
+  const bool stopped =
+    mode_ == Mode::SAFE_HOLD && !policy_enabled_.load(std::memory_order_relaxed);
+  walk_state_accumulator_s_ += dt;
+  const bool changed = static_cast<int>(stopped) != walk_state_last_;
+  if (!changed && walk_state_accumulator_s_ < 1.0 / walk_state_rate_hz_) {return;}
+  walk_state_msg_.data = stopped;
+  // 잠금을 못 잡으면 다음 틱에 다시 시도한다(값이 바뀐 것은 walk_state_last_ 로 남는다).
+  if (walk_state_rt_publisher_->try_publish(walk_state_msg_)) {
+    walk_state_last_ = static_cast<int>(stopped);
+    walk_state_accumulator_s_ = 0.0;
+  }
 }
 
 }  // namespace kid_rl

@@ -4,6 +4,7 @@
 #ifndef KID_RL__KID_RL_CONTROLLER_HPP_
 #define KID_RL__KID_RL_CONTROLLER_HPP_
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -12,8 +13,9 @@
 #include <vector>
 
 #include "controller_interface/controller_interface.hpp"
+#include "geometry_msgs/msg/twist_stamped.hpp"
 #include "kid_rl/csv_logger.hpp"
-#include "kid_rl/gamepad.hpp"
+#include "kid_rl/external_commands.hpp"
 #include "kid_rl/imu.hpp"
 #include "kid_rl/input_types.hpp"
 #include "kid_rl/policy_runner.hpp"
@@ -23,6 +25,8 @@
 #include "kid_rl/gait_phase.hpp"
 #include "kid_rl/lowpass.hpp"
 #include "rclcpp/subscription.hpp"
+#include "realtime_tools/realtime_buffer.hpp"
+#include "realtime_tools/realtime_publisher.hpp"
 #include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
 #include "std_msgs/msg/bool.hpp"
 
@@ -86,7 +90,7 @@ private:
     FAULT               ///< targets frozen; config decides whether recovery is latched
   };
 
-  // Gamepad and IMU use direct device I/O, not ROS topics.
+  // IMU uses direct device I/O, not ROS topics.
   void policy_enable_callback(std_msgs::msg::Bool::SharedPtr msg);
 
   // Real-time helpers.
@@ -110,6 +114,16 @@ private:
   double policy_rate_hz_{50.0};
   double ready_pose_duration_s_{2.0};
   double command_timeout_s_{0.25}, imu_timeout_s_{0.10};
+  // 자동 정지: walk_command.topic 이 (0, 0, 0) 이고 자이로 크기가 auto_hold.gyro_threshold
+  // [rad/s] 미만으로 auto_hold.settle_s 동안 유지되면 enable_policy 를 false 로 내린다
+  // (-> SAFE_HOLD, motion_operator 다리 명령을 받음). 그 뒤 walk_command.topic 에 0 이 아닌
+  // 속도가 오면 enable_policy 를 다시 true 로 올린다. 사람이 ~/enable_policy 로 직접 바꾸면
+  // auto_disabled_ 가 지워져서, 사람이 끈 정책은 토픽 명령으로 켜지지 않는다.
+  bool auto_hold_enabled_{true};
+  double auto_hold_gyro_threshold_{0.1}, auto_hold_settle_s_{0.5};
+  double auto_hold_timer_s_{0.0};
+  // 비실시간 enable_policy 콜백이 지우고 update() 가 세우고 읽는다.
+  std::atomic<bool> auto_disabled_{false};
   double action_scale_{1.0};
   /// 학습의 agent.clip_actions 와 같은 값. 0 이면 끈다.
   double action_clip_{5.0};
@@ -142,6 +156,61 @@ private:
   /// joint_pos_action.clip (예: torso_yaw (0, 0)) 과 같은 관절이어야 한다.
   std::vector<std::string> fixed_target_joints_;
   std::vector<bool> fixed_target_;
+  /// 정책과 무관한 관절(관측·action 에 없음). 활성화 때 측정 자세에서 hold_positions 까지
+  /// hold_rate_limit 으로 천천히 옮긴 뒤 모든 모드에서 그 자리에 붙잡는다.
+  /// IRC 로봇처럼 학습 모델에서는 고정된 상체(팔, 허리)를 실기에서 잡을 때 쓴다.
+  std::vector<std::string> hold_joints_;
+  std::vector<double> hold_positions_, hold_targets_;
+  std::vector<std::size_t> hold_position_state_index_, hold_command_index_;
+  double hold_rate_limit_{0.5};
+  /// 정책이 요청되면(enable_policy=true) 외부 명령을 놓고 hold_positions 로 돌아가는 고정 관절.
+  /// 팔·허리처럼 정책이 학습한 자세가 있는 관절이다. 그리퍼(공을 쥔 채 걷는다)와
+  /// tilt(pan_tilt 전용)는 false 라 계속 외부 명령을 따른다.
+  std::vector<bool> hold_release_;
+  double last_dt_s_{0.0};
+  bool read_hold_positions(std::vector<double> & out);
+  bool write_hold_commands();
+  /// 고정 관절의 이번 틱 측정값 (/motor_status 용). 읽기 실패 시 마지막 값을 유지한다.
+  std::vector<double> hold_measured_, hold_velocities_;
+  std::vector<std::size_t> hold_velocity_state_index_;
+  void read_hold_state();
+
+  /// 외부 노드(motion_operator, humanoid_manipulation, 비전 pan_tilt)의 모터 명령.
+  /// 슬롯 k: k < joints_.size() 이면 정책 관절, 아니면 hold_joints_[k - joints_.size()].
+  ExternalCommands external_;
+  ExternalCommands::Config external_config_;
+  bool external_enabled_{false};
+  /// 정책 관절(다리)에 온 외부 명령을 받을지. 받더라도 SAFE_HOLD 이고 enable_policy=false
+  /// 일 때만 따르고, 정책이 요청되는 순간 놓아서 다리가 default 자세로 돌아간다.
+  bool external_accept_policy_joints_{true};
+  /// 슬롯별: 마지막으로 처리한 seq, 따르는 중인지, 목표, 프로파일, 현재 프로파일 속도.
+  std::vector<std::uint64_t> external_applied_seq_;
+  std::vector<bool> external_latched_;
+  /// tilt 모터의 hold_joints 인덱스(-1 = 없음). 이 관절은 hold_positions 로 가지 않고
+  /// pan_tilt 명령만 따른다(명령 전에는 활성화 때 측정 자세를 유지).
+  int tilt_hold_index_{-1};
+
+  // 모션 P gain (motion_gain.*): SAFE_HOLD 이고 enable_policy=false 면 motion_gain.p_gains 를,
+  // 그 밖의 모드에서는 robot_description 의 <관절>_dxl <param name="Position P Gain"> (학습 값)을
+  // <관절>_dxl/Position P Gain command 에 쓴다. 순서는 정책 관절 다음 고정 관절.
+  // 그 command_interface 가 robot_description 에 하나도 없으면(예: mock) 스스로 끈다.
+  static constexpr char kGainInterface[] = "Position P Gain";
+  bool configure_gains();
+  bool write_gain_commands();
+  bool motion_gain_enabled_{true};
+  bool gain_interfaces_{false};
+  std::vector<double> motion_gains_, trained_gains_;
+  std::vector<std::size_t> gain_command_index_;
+  /// 학습 gain 을 연속으로 쓴 틱 수. POLICY_RUNNING 진입은 이 값이 2 이상이어야 한다
+  /// (이번 틱에 쓴 값은 이 틱의 write() 에서야 서보로 나간다).
+  int trained_gain_ticks_{0};
+  std::vector<double> external_goal_, external_velocity_, external_acceleration_;
+  std::vector<double> external_speed_;
+  /// 새 외부 명령을 받아 슬롯에 걸어 둔다. 모드에 따라 받지 않을 명령은 버린다.
+  void process_external_commands(bool policy_requested);
+  /// Dynamixel 프로파일(속도·가속 상한, 0 = 제한 없음)을 흉내 내 target 을 goal 쪽으로 옮긴다.
+  static double profile_step(
+    double target, double goal, double velocity, double acceleration, double dt, double & speed);
   /// POLICY_RUNNING 진입 후 첫 추론인지. 첫 틱은 변화율 검사에서 제외한다.
   bool policy_first_setpoint_{true};
   /// 정책이 만든 목표의 변화율 상한 [rad/s]. 넘으면 폴트로 멈춘다.
@@ -153,8 +222,6 @@ private:
   int policy_slew_strikes_{0};
   bool dry_run_policy_{false};
   std::string policy_path_;
-  bool gamepad_enabled_{true};
-  Gamepad::Config gamepad_config_;
   bool imu_enabled_{false};
   Imu::Config imu_config_;
 
@@ -197,11 +264,33 @@ private:
   bool fault_recoverable_{true};
   Mode mode_{Mode::WAITING_FOR_STATE};
 
-  Gamepad gamepad_;
   Imu imu_;
   PolicyRunner policy_runner_;
   std::atomic<bool> policy_enabled_{false};
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr policy_enable_subscription_;
+
+  // 보행 속도 명령(geometry_msgs/TwistStamped):
+  // twist.linear.x / linear.y [m/s], twist.angular.z [rad/s]. 비실시간 콜백이
+  // CommandSample(정상 시계 stamp)로 넣고 update() 가 읽는다.
+  void walk_command_callback(geometry_msgs::msg::TwistStamped::SharedPtr msg);
+  std::string walk_command_topic_{"/cmd_vel"};
+  /// 보행 명령 크기 상한 vx, vy [m/s], wz [rad/s]. 학습 범위 밖으로 나가지 않게 자른다.
+  std::array<double, 3> walk_command_max_{0.4, 0.3, 0.7};
+  rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr walk_command_subscription_;
+  realtime_tools::RealtimeBuffer<CommandSample> walk_command_buffer_;
+
+  // 보행 정지 상태(std_msgs/Bool, walk_state.topic): true = SAFE_HOLD 이고 enable_policy=false 라
+  // 다리가 외부 명령(/dynamixel_control)을 따른다. task planner 는 이게 true 가 된 뒤에 모션이나
+  // 매니를 시작한다. 값이 바뀌면 바로, 아니면 walk_state.rate_hz 로 다시 낸다.
+  void publish_walk_state(double dt);
+  std::string walk_state_topic_{"/walk_stopped"};
+  double walk_state_rate_hz_{10.0};
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr walk_state_publisher_;
+  std::unique_ptr<realtime_tools::RealtimePublisher<std_msgs::msg::Bool>>
+  walk_state_rt_publisher_;
+  std_msgs::msg::Bool walk_state_msg_;
+  double walk_state_accumulator_s_{0.0};
+  int walk_state_last_{-1};  ///< 마지막으로 낸 값. -1 = 아직 안 냄.
 };
 
 }  // namespace kid_rl

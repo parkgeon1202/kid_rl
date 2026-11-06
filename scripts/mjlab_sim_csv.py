@@ -242,8 +242,12 @@ def main() -> int:
 
     flat = "Flat" in args.task
     robot_kind = "irc" if args.task.endswith("-IRC") else "dance"
-    env_cfg = make_kid_rl_velocity_env_cfg(play=True, flat=flat, enable_randomization=False,
-                                           robot=robot_kind)
+    import inspect
+    cfg_kwargs = dict(play=True, flat=flat, enable_randomization=False)
+    # mjlab_kid_RL irc 브랜치는 IRC 전용이라 robot 인자가 없다.
+    if "robot" in inspect.signature(make_kid_rl_velocity_env_cfg).parameters:
+        cfg_kwargs["robot"] = robot_kind
+    env_cfg = make_kid_rl_velocity_env_cfg(**cfg_kwargs)
     # actor gyro 필터를 실기 컨트롤러 설정과 같게 맞춘다 (학습 기본값이 아니라 배포 설정 기준).
     gyro_fc = args.gyro_filter_hz if args.gyro_filter_hz is not None else \
         float(ctl.get("imu_gyro_filter_hz", 0.0))

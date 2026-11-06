@@ -24,7 +24,6 @@ for j, d in zip(joints, defaults):
 open(f"{out_dir}/mock.urdf", "w").write(u)
 p["policy_path"] = model
 p["imu.port"] = port
-p["gamepad.enabled"] = False
 p["log.path"] = log_path
 yaml.safe_dump(cfg, open(f"{out_dir}/params.yaml", "w"))
 print("joints", len(joints), "gpio left", u.count("<gpio"), "hardware_state", u.count('name="hardware_state"'))

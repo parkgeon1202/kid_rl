@@ -2,8 +2,8 @@
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
   <!-- Include this macro from the robot URDF.
 
-       irc 브랜치: IRC 로봇은 다리 12개만 구동한다. 상체 13개(torso_yaw, 목, 머리, 팔) 서보 줄을
-       뺐고 다리 ID 와 나머지 kp 는 dance 로봇과 같다. 좌우 hip_yaw(MX-64)만 150: IRC 모델은
+       irc 브랜치: IRC 로봇은 다리 12개를 policy 로 구동하고, 상체 9개(팔, 그리퍼, 허리, 카메라 tilt)는
+       고정 자세로 잡는다(아래 IRC 상체 블록). dance 상체 서보 줄은 뺐고 다리 ID 와 나머지 kp 는 dance 로봇과 같다. 좌우 hip_yaw(MX-64)만 150: IRC 모델은
        kp_fw 167 로 학습했고 실기 150 이 같은 PWM 이다(150 x 141.32 / 127 = 167).
 
        모터 모델은 학습 모델(mjlab kid_RL.xml)의 액추에이터 클래스와 대응한다:
@@ -65,14 +65,14 @@
        측정할 때만 true 로 바꾼다. 꺼 두면 그 열은 -1 이다. -->
   <xacro:property name="measure_write_drain" value="false"/>
 
-  <xacro:macro name="kid_dynamixel_ros2_control" params="name:=KidDynamixel port:=/dev/ttyUSB-U2D2 baud:=1000000 rw_rate:=50">
+  <xacro:macro name="kid_dynamixel_ros2_control" params="name:=KidDynamixel port:=/dev/ttyUSB-U2D2 baud:=1000000 rw_rate:=50 gripper_goal_pwm:=''">
     <ros2_control name="${name}" type="system" rw_rate="${rw_rate}">
       <hardware>
         <plugin>dynamixel_hardware_interface/DynamixelHardware</plugin>
         <param name="port_name">${port}</param>
         <param name="baud_rate">${baud}</param>
-        <param name="number_of_joints">12</param>
-        <param name="number_of_transmissions">12</param>
+        <param name="number_of_joints">21</param>
+        <param name="number_of_transmissions">21</param>
         <param name="dynamixel_model_folder">/param/dxl_model</param>
         <!-- 두 가지 용도를 겸하는 값이다.
              (1) 런타임 허용치: 400ms = 50Hz에서 연속 20틱 실패하면 read() 가
@@ -110,7 +110,7 @@
         <param name="write_on_read_failure">true</param>
       </hardware>
 
-      <xacro:macro name="kid_joint" params="joint id kp sign:=1.0">
+      <xacro:macro name="kid_joint" params="joint id kp sign:=1.0 goal_pwm:=''">
         <joint name="${joint}">
           <command_interface name="position"/>
           <state_interface name="position"/>
@@ -137,6 +137,13 @@
           <param name="type">dxl</param>
           <param name="ID">${id}</param>
           <command_interface name="Goal Position"/>
+          <!-- kid_rl 이 실행 중에 P gain 을 바꾼다: SAFE_HOLD(모션·매니)에서는 motion_gain.p_gains,
+               그 밖에는 아래 <param name="Position P Gain"> (학습 값). 드라이버는 이 command 를 같은
+               이름의 param 값에서 시작하므로 컨트롤러가 쓰기 전에도 0 이 나가지 않는다.
+               모든 서보에 선언해야 Sync Write 가 유지된다(한 서보라도 항목이 다르면 Bulk Write).
+               Goal Position(116)과 주소가 떨어져 있어 드라이버가 Indirect Address 로 묶어 쓴다.
+               비용은 서보당 2 바이트. -->
+          <command_interface name="Position P Gain"/>
           <state_interface name="Present Position"/>
           <state_interface name="Present Velocity"/>
           <!-- Present Current 는 MX-28 컨트롤 테이블에 없다(126번지가 Present
@@ -205,6 +212,11 @@
                0이 아닌 값이 남아 있으면 플랜트가 조용히 달라진다. -->
           <param name="Position I Gain">0</param>
           <param name="Position D Gain">0</param>
+          <!-- Goal PWM 은 RAM 값이라 on_init 에서 매번 쓴다(InitDxlItems 가 gpio param 을 모두 쓴다).
+               지금은 그리퍼만 쓴다: 물체를 쥔 채 멈췄을 때 내는 힘(=PWM)의 상한. -->
+          <xacro:if value="${goal_pwm != ''}">
+            <param name="Goal PWM">${goal_pwm}</param>
+          </xacro:if>
         </gpio>
         <transmission name="${joint}_transmission">
           <plugin>transmission_interface/SimpleTransmission</plugin>
@@ -229,6 +241,25 @@
       <xacro:kid_joint joint="left_knee_pitch" id="16" kp="149" sign="1"/>
       <xacro:kid_joint joint="left_ankle_pitch" id="18" kp="149" sign="-1"/>
       <xacro:kid_joint joint="left_ankle_roll_crank" id="20" kp="102" sign="1"/>
+      <!-- IRC 상체: 학습 모델에서는 관절 없이 고정된 부분(어깨 pitch 30도 앞, 팔꿈치 90도 앞, 나머지 0).
+           policy 관측·action 에는 없고, controllers.yaml 의 hold_joints 로 그 자세에 붙잡는다.
+           ID 배치: 왼쪽 0 어깨 pitch, 2 어깨 roll, 4 팔꿈치, 6 그리퍼 / 오른쪽 1, 3, 5 / 22 허리, 23 카메라 tilt.
+           팔·tilt·그리퍼는 MX-28, 허리는 MX-64 로 본다(dance 로봇과 같은 ID). sim 처럼 단단히 잡으려고
+           MX-28 은 120(dance 팔 실험값), 허리는 400.
+           2026-10-26: 허리 150 -> 400. 실기에서 허리가 손으로 말랑하게 돌아가고, 걷는 중 골반 yaw 가 6~15 Hz 로
+           sim 의 약 10배 떨렸다(hip_yaw 관절 움직임은 sim 의 1.3~1.6배뿐). sim 은 상체가 골반에 강체로 붙어 있어,
+           허리를 단단히 묶어 그 조건에 가깝게 한다.
+           2026-10-30: camera_tilt 120 -> 600. policy 와 무관하고, 보행·모션 모두 같은 값(controllers.yaml
+           motion_gain.p_gains 의 tilt 도 600). -->
+      <xacro:kid_joint joint="left_shoulder_pitch" id="0" kp="120" sign="1"/>
+      <xacro:kid_joint joint="right_shoulder_pitch" id="1" kp="120" sign="1"/>
+      <xacro:kid_joint joint="left_shoulder_roll" id="2" kp="120" sign="1"/>
+      <xacro:kid_joint joint="right_shoulder_roll" id="3" kp="120" sign="1"/>
+      <xacro:kid_joint joint="left_elbow_pitch" id="4" kp="120" sign="1"/>
+      <xacro:kid_joint joint="right_elbow_pitch" id="5" kp="120" sign="1"/>
+      <xacro:kid_joint joint="gripper" id="6" kp="120" sign="1" goal_pwm="${gripper_goal_pwm}"/>
+      <xacro:kid_joint joint="torso_yaw" id="22" kp="400" sign="1"/>
+      <xacro:kid_joint joint="camera_tilt" id="23" kp="600" sign="1"/>
       <xacro:if value="${bus_timing}">
         <!-- 서보가 아니라 드라이버 자신의 측정값. ID 는 드라이버의 공통 gpio 검사를
              통과하려고 넣은 자리표시자이고 쓰이지 않는다(ping 도 레지스터 쓰기도 안 함). -->

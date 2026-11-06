@@ -11,6 +11,8 @@
   <depend>controller_interface</depend>
   <depend>ament_index_cpp</depend>
   <depend>dynamixel_hardware_interface</depend>
+  <depend>dynamixel_interfaces</depend>
+  <depend>geometry_msgs</depend>
   <depend>hardware_interface</depend>
   <depend>pluginlib</depend>
   <depend>rclcpp</depend>

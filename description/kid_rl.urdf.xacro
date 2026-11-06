@@ -87,15 +87,23 @@
   <xacro:kid_dummy_joint name="right_ankle_pitch"      lower="-0.934"    upper="1.715"/>
   <xacro:kid_dummy_joint name="right_ankle_roll_crank" lower="-1.047198" upper="1.396263"/>
 
+  <!-- IRC 상체 고정 관절 중 dance 이름에 없는 것 (controllers.yaml hold_joints). -->
+  <xacro:kid_dummy_joint name="gripper"                lower="-3.14159"  upper="3.14159"/>
+  <xacro:kid_dummy_joint name="camera_tilt"            lower="-3.14159"  upper="3.14159"/>
+
   <xacro:arg name="port" default="/dev/ttyUSB-U2D2"/>
   <!-- 3 Mbps -> 1 Mbps (2026-09-23). 서보 EEPROM 의 Baud Rate 도 함께 바꿔야 한다. -->
   <xacro:arg name="baud" default="1000000"/>
   <!-- controller_manager update_rate 를 넘을 수 없다. 같게 두면 "매 제어 틱마다
        읽고 쓴다"는 뜻이다. controllers.yaml 의 update_rate 와 함께 바꿀 것. -->
   <xacro:arg name="rw_rate" default="50"/>
+  <!-- 그리퍼(ID 6) Goal PWM. 값은 config/controllers.yaml 의 dynamixel_hardware.gripper_goal_pwm 이고
+       launch 가 읽어 넘긴다. 빈 문자열이면 서보에 남아 있는 값을 그대로 둔다. -->
+  <xacro:arg name="gripper_goal_pwm" default=""/>
 
   <xacro:include filename="$(find kid_rl)/description/kid_dynamixel.ros2_control.xacro"/>
   <xacro:kid_dynamixel_ros2_control
-    port="$(arg port)" baud="$(arg baud)" rw_rate="$(arg rw_rate)"/>
+    port="$(arg port)" baud="$(arg baud)" rw_rate="$(arg rw_rate)"
+    gripper_goal_pwm="$(arg gripper_goal_pwm)"/>
 
 </robot>
