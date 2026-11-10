@@ -29,9 +29,10 @@ That repository lists every change made to the driver. This page explains how ki
 
 | Branch | Robot | Policy (`models/policy.onnx`) |
 |---|---|---|
-| `main` | Dance robot, 25 policy joints (whole body) | Walking policy deployed on 2026-10-14 |
-| `irc` | IRC robot, 12 policy joints (legs only), upper body held | Flat-ground walking policy for the IRC robot |
-| `irc_hurdle` | IRC robot, as `irc` | Hurdle policy that also observes the hurdle position from vision (§7) |
+| `main` | Dance robot, 25 policy joints (whole body), gamepad | Walking policy deployed on 2026-10-14 |
+| `irc` | IRC robot, 12 policy joints (legs only), gamepad | Flat-ground walking policy for the IRC robot |
+| `for_irc_contest` | IRC robot, 12 policy joints (legs only), upper body held. Walking commands, motions and manipulation come from other ROS nodes instead of a gamepad | Flat-ground policy trained to lift each foot at least 2 cm for at least 0.3 s (run 2026-11-02_02-17-02) |
+| `irc_hurdle` | IRC robot, as `for_irc_contest` | Hurdle policy that also observes the hurdle position from vision (§7) |
 
 This README describes `irc_hurdle`. Each branch carries the `policy.onnx` that was deployed with it.
 
