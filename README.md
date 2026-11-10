@@ -51,7 +51,7 @@ On the competition robot, kid_rl is the only node that talks to the servos. The 
 | [motion_operator](https://github.com/ROBIT-KOR-teamHumanoid/motion_operator) | Scripted whole-body motions (keyframes) | `/dynamixel_control` → kid_rl<br>`/motor_status` ← kid_rl |
 | [humanoid_manipulation](https://github.com/parkgeon1202/humanoid_manipulation) | Ball pick-up and shooting with the arms and gripper (FSM, IK) | `/dynamixel_control`, `/gripper_control` → kid_rl<br>`/motor_status` ← kid_rl |
 | [irc_vision](https://github.com/ROBIT-KOR-teamHumanoid/irc_vision) | RealSense ball / hurdle detection. Its `pan_tilt` node aims the camera; its refiner publishes the hurdle position | `/RealsensePanTilt` → kid_rl (camera tilt, ID 23)<br>`/hurdle/pose` → kid_rl (hurdle position, §9) |
-| `dynamixel_interfaces` | Message definitions for the topics above (see the note in §5) | — |
+| [dynamixel_interfaces (fork)](https://github.com/parkgeon1202/dynamixel_interfaces/tree/kid-rl) | ROBOTIS messages plus the five used on the topics above (see the note in §5) | — |
 | EBIMU | IMU, read by kid_rl directly from the serial port | — |
 
 Before `for_irc_contest`, those packages talked to a separate team DYNAMIXEL node. kid_rl now takes that node's place, so the walking policy, motions and manipulation share one bus and one driver: it accepts the same topics (with a servo `id` added to every element) and publishes the same motor status, so motion_operator and humanoid_manipulation work without a separate driver.
@@ -106,7 +106,7 @@ Tested on Ubuntu 24.04 with ROS 2 Jazzy.
 ```bash
 cd ~/${WORKSPACE}/src
 git clone -b jazzy  https://github.com/ROBOTIS-GIT/DynamixelSDK.git
-git clone -b jazzy  https://github.com/ROBOTIS-GIT/dynamixel_interfaces.git
+git clone -b kid-rl https://github.com/parkgeon1202/dynamixel_interfaces.git
 git clone -b kid-rl https://github.com/parkgeon1202/dynamixel_hardware_interface.git
 git clone -b irc_hurdle https://github.com/parkgeon1202/kid_rl.git
 cd ~/${WORKSPACE}
@@ -115,7 +115,7 @@ colcon build --packages-up-to kid_rl \
 source install/setup.bash
 ```
 
-> **Note on `dynamixel_interfaces`.** The external command topics use five messages that are **not** in the ROBOTIS repository: `DynamixelMsgs`, `DynamixelControlMsgs`, `DynamixelStateMsgs`, `DynamixelMotorState` and `PanTilt` (each motor element carries an `id`). Build kid_rl against a `dynamixel_interfaces` that includes them, the same one motion_operator and humanoid_manipulation are built with.
+> **Note on `dynamixel_interfaces`.** The external command topics use five messages that are **not** in the ROBOTIS repository: `DynamixelMsgs`, `DynamixelControlMsgs`, `DynamixelStateMsgs`, `DynamixelMotorState` and `PanTilt` (each motor element carries an `id`). They are in the [dynamixel_interfaces fork](https://github.com/parkgeon1202/dynamixel_interfaces/tree/kid-rl) cloned above. Build motion_operator and humanoid_manipulation against the same package.
 
 `ONNXRUNTIME_ROOT` must contain `include/onnxruntime_cxx_api.h` and `lib/libonnxruntime.so` from the ONNX Runtime C++ release. It can also be set as an environment variable.
 
