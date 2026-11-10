@@ -41,6 +41,11 @@ public:
     /// 그보다 짧은 끊김은 이 값으로만 보인다. 샘플이 한 번도 없으면 -1.
     double imu_age_ms{-1.0};
     int command_fresh{0};
+    /// /hurdle/pose. hurdle_fresh: 이번 틱 관측 프레임이 [1, x, y, z] 인가(지난 정책 스텝 뒤 새로 받음).
+    int hurdle_fresh{0};
+    double hurdle_age_ms{-1.0};       ///< 마지막 수신의 나이 [ms]. 받은 적 없으면 -1
+    double hurdle_period_ms{-1.0};    ///< 마지막 수신과 그 직전 수신의 간격 [ms]. 모르면 -1
+    double hurdle_position[3]{};      ///< base_link x, y, z [m]. fresh 가 아니면 0
     double gravity[3]{};         ///< 몸통 좌표계 투영 중력
     double gyro[3]{};            ///< 몸통 좌표계 각속도 [rad/s], 관측에 들어간 값 (필터 후)
     double gyro_raw[3]{};        ///< 필터 전 IMU 각속도 [rad/s]

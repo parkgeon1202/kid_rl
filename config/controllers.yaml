@@ -453,6 +453,12 @@ kid_rl:
     external.status_rate_hz: 50.0
     external.gripper_id: 6
     external.tilt_id: 23
+    # geometry_msgs/PoseStamped: irc_vision refiner 가 허들을 찾은 프레임에만 내는 base_link
+    # 좌표 [m]. 정책이 hurdle_vision 을 관측하면(모델 메타데이터) 정책 스텝(50 Hz)마다
+    # 지난 정책 스텝 뒤에 새로 받았으면 [1, x, y, z], 아니면 [0, 0, 0, 0] 을 넣고(시간으로 유지 안 함),
+    # 0.1 s 간격 11 프레임을 오래된 것부터 이어 44 칸을 관측 끝에 붙인다. CSV 의 hurdle_period_ms
+    # 가 수신 간격이다. 카메라 tilt 는 task planner 가 450 mm 규칙으로 따로 바꾼다.
+    external.hurdle_pose_topic: "/hurdle/pose"
     # 비어 있으면 설치된 kid_rl/models/policy.onnx를 사용한다.
     policy_path: ""
     # true이면 ONNX를 실행하지 않고 0 action을 내므로 통신 시험에만 사용한다.

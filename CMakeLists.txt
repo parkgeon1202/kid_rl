@@ -86,6 +86,10 @@ if(BUILD_TESTING)
   target_include_directories(gait_phase_test PRIVATE include)
   add_test(NAME gait_phase_test COMMAND gait_phase_test
     "${CMAKE_CURRENT_SOURCE_DIR}/test/data/gait_phase_mjlab.csv")
+  # hurdle_vision 44 칸이 학습(tasks/hurdle.py)과 같은 순서·간격인지.
+  add_executable(hurdle_vision_test test/hurdle_vision_test.cpp)
+  target_include_directories(hurdle_vision_test PRIVATE include)
+  add_test(NAME hurdle_vision_test COMMAND hurdle_vision_test)
   # 전압·PWM 진단: xacro 선언으로 켜지는지, PWM 부호 변환, CSV 열.
   add_executable(motor_telemetry_test test/motor_telemetry_test.cpp)
   target_link_libraries(motor_telemetry_test PRIVATE ${PROJECT_NAME})

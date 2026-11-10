@@ -32,12 +32,20 @@ public:
   /// 관측: 모델 메타데이터 observation_names 가 base_observation_names 와 같으면 위상 없는
   /// 모델(입력 크기 base_observation_size), 그 뒤에 "gait_phase" 가 하나 더 붙어 있으면
   /// 위상(sin, cos)을 쓰는 모델(입력 크기 base + 2)로 보고 uses_gait_phase 에 알린다.
+  /// 맨 끝에 "hurdle_vision" 이 붙어 있으면 허들 관측(kHurdleVisionSize 칸)을 쓰는 모델로
+  /// 보고 uses_hurdle_vision 에 알린다(gait_phase 가 있으면 그 뒤).
+  /// 프레임을 쌓은 모델(mjlab ObservationTermCfg.history_length): 메타데이터에는 이름만 있으므로
+  /// 입력 폭에서 거꾸로 구한다. 쌓이는 앞부분(stacked_observation_size 칸, base 의 앞쪽)이
+  /// history_length 번 들어 있으면 그 수를 알린다. 안 쌓은 모델은 1.
   /// 그 밖의 순서·이름은 컨트롤러가 조립하는 관측과 다르므로 거부한다.
   bool load(
     const std::string & model_path,
     const std::vector<std::string> & base_observation_names,
     std::size_t base_observation_size,
     bool & uses_gait_phase,
+    bool & uses_hurdle_vision,
+    std::size_t stacked_observation_size,
+    std::size_t & history_length,
     std::size_t expected_action_size,
     const std::vector<std::string> & expected_joint_names,
     const std::vector<double> & expected_default_positions,

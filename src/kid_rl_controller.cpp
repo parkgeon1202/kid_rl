@@ -113,6 +113,8 @@ controller_interface::CallbackReturn KidRlController::on_init()
       auto_declare<std::string>("external.pan_tilt_topic", "/RealsensePanTilt");
     external_config_.status_topic =
       auto_declare<std::string>("external.status_topic", "/motor_status");
+    external_config_.hurdle_pose_topic =
+      auto_declare<std::string>("external.hurdle_pose_topic", "/hurdle/pose");
     external_config_.gripper_id =
       static_cast<int>(auto_declare<std::int64_t>("external.gripper_id", 6));
     external_config_.tilt_id = static_cast<int>(auto_declare<std::int64_t>("external.tilt_id", 23));
@@ -370,6 +372,10 @@ controller_interface::CallbackReturn KidRlController::on_configure(const rclcpp_
   // 모델과 다르면 load 가 실패한다.
   observation_.assign(3 + 3 + 3 * n + 3, 0.0);
   uses_gait_phase_ = false;
+  uses_hurdle_vision_ = false;
+  observation_history_ = 1;
+  stacked_frames_.assign(3 + 3 + 3 * n, 0.0);
+  stacked_frames_empty_ = true;
   position_state_index_.assign(n, 0);
   velocity_state_index_.assign(n, 0);
   hardware_state_index_.assign(n, 0);
@@ -387,9 +393,12 @@ controller_interface::CallbackReturn KidRlController::on_configure(const rclcpp_
     // build_observation() 이 조립하는 순서. 모델 메타데이터와 이름·순서가 같아야 한다.
     static const std::vector<std::string> kBaseObservationNames{
       "base_ang_vel", "projected_gravity", "joint_pos", "joint_vel", "actions", "command"};
+    // 쌓을 수 있는 앞부분: command 앞까지(gyro 3 + gravity 3 + joint_pos/vel/actions 3n).
+    const std::size_t stacked_size = 3 + 3 + 3 * n;
     if (!policy_runner_.load(
         policy_path_, kBaseObservationNames, observation_.size(), uses_gait_phase_,
-        actions_.size(), joints_, default_positions_, action_scale_, policy_error))
+        uses_hurdle_vision_, stacked_size, observation_history_, actions_.size(), joints_,
+        default_positions_, action_scale_, policy_error))
     {
       RCLCPP_ERROR(
         get_node()->get_logger(), "Could not load policy '%s': %s",
@@ -412,6 +421,42 @@ controller_interface::CallbackReturn KidRlController::on_configure(const rclcpp_
         get_node()->get_logger(),
         "Policy observes gait_phase: swing %.3f s, double support band %.3f -> cycle %.6f s, "
         "observation %zu", gait_swing_time_s_, gait_double_support_band_, gait_cycle_time_s_,
+        observation_.size());
+    }
+    stacked_frames_.assign(observation_history_ * stacked_size, 0.0);
+    stacked_frames_empty_ = true;
+    if (observation_history_ > 1) {
+      observation_.assign(observation_.size() + (observation_history_ - 1) * stacked_size, 0.0);
+      RCLCPP_INFO(
+        get_node()->get_logger(),
+        "Policy stacks %zu frames (one per policy step) of base_ang_vel, projected_gravity, "
+        "joint_pos, joint_vel, actions; observation %zu", observation_history_,
+        observation_.size());
+    }
+    if (uses_hurdle_vision_) {
+      // 프레임 간격(kHurdleVisionStride 스텝 = 0.1 s)은 학습의 50 Hz 스텝 기준이다.
+      if (policy_rate_hz_ != kHurdleVisionStepRateHz) {
+        RCLCPP_ERROR(
+          get_node()->get_logger(),
+          "Policy '%s' observes hurdle_vision, which needs policy_rate_hz %.1f (got %.1f)",
+          policy_path_.c_str(), kHurdleVisionStepRateHz, policy_rate_hz_);
+        policy_runner_.reset();
+        return CallbackReturn::ERROR;
+      }
+      if (!external_enabled_ || external_config_.hurdle_pose_topic.empty()) {
+        RCLCPP_ERROR(
+          get_node()->get_logger(),
+          "Policy '%s' observes hurdle_vision but external.enabled is false or "
+          "external.hurdle_pose_topic is empty", policy_path_.c_str());
+        policy_runner_.reset();
+        return CallbackReturn::ERROR;
+      }
+      observation_.assign(observation_.size() + kHurdleVisionSize, 0.0);
+      RCLCPP_INFO(
+        get_node()->get_logger(),
+        "Policy observes hurdle_vision: %s, %zu frames %.1f s apart, "
+        "[0,0,0,0] on steps without a new pose, observation %zu", external_config_.hurdle_pose_topic.c_str(), kHurdleVisionFrames,
+        static_cast<double>(kHurdleVisionStride) / kHurdleVisionStepRateHz,
         observation_.size());
     }
 
@@ -713,6 +758,9 @@ controller_interface::CallbackReturn KidRlController::on_activate(const rclcpp_l
   std::fill(observation_.begin(), observation_.end(), 0.0);
   action_clip_warned_ = false;
   gait_clock_.restart();
+  hurdle_vision_.reset();
+  hurdle_pose_consumed_ns_ = steady_time_nanoseconds();
+  stacked_frames_empty_ = true;
   ready_pose_elapsed_s_ = 0.0;
   auto_hold_timer_s_ = 0.0;
   auto_disabled_.store(false, std::memory_order_relaxed);
@@ -837,7 +885,7 @@ bool KidRlController::read_joint_state()
 
 void KidRlController::log_tick(
   double dt, const CommandSample & command, const ImuSample & imu,
-  bool command_fresh, bool imu_fresh)
+  bool command_fresh, bool imu_fresh, const HurdlePoseSample & hurdle_pose, bool hurdle_fresh)
 {
   // 제어 스레드에서 불린다. 여기서 하는 일은 미리 할당된 구조체를 채워
   // 링 버퍼에 복사하는 것뿐이다. 파일 접근도 할당도 없다.
@@ -861,6 +909,14 @@ void KidRlController::log_tick(
   bus_timing_monitor_.fill(
     state_interfaces_, static_cast<double>(log_now_ns) * 1.0e-9, log_sample_);
   log_sample_.command_fresh = command_fresh ? 1 : 0;
+  // /hurdle/pose: 이번 틱 프레임이 살아 있는지, 마지막 수신의 나이와 직전 수신과의 간격.
+  log_sample_.hurdle_fresh = hurdle_fresh ? 1 : 0;
+  log_sample_.hurdle_age_ms = hurdle_pose.valid ?
+    static_cast<double>(log_now_ns - hurdle_pose.stamp_ns) / 1.0e6 : -1.0;
+  log_sample_.hurdle_period_ms = hurdle_pose.period_ms;
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    log_sample_.hurdle_position[axis] = hurdle_fresh ? hurdle_pose.position[axis] : 0.0;
+  }
   for (std::size_t axis = 0; axis < 3; ++axis) {
     log_sample_.gravity[axis] = imu.projected_gravity[axis];
     log_sample_.gyro[axis] = imu.angular_velocity[axis];
@@ -970,21 +1026,41 @@ void KidRlController::build_observation(const CommandSample & command, const Imu
   // the policy fed back to itself during training: mjlab's last_action term reads
   // env.action_manager.action, and the RSL-RL wrapper clamps to agent.clip_actions
   // before env.step() (mjlab/rl/vecenv_wrapper.py:75-76).
+  //
+  // 프레임을 쌓는 모델(observation_history_ > 1, 허들 태스크)은 앞의 다섯 항목을 정책 스텝마다
+  // 하나씩 쌓아 항목별로 오래된 것부터 넣는다(mjlab term-major: gyro_t-4..gyro_t, gravity_t-4..).
+  // command 와 그 뒤 항목은 쌓지 않는다.
+  const std::size_t n = joints_.size();
+  const std::size_t frame_size = 3 + 3 + 3 * n;
+  const std::size_t frames = observation_history_;
+  double * newest = &stacked_frames_[(frames - 1) * frame_size];
+  if (frames > 1) {
+    // 한 칸씩 앞으로 민다. 크기가 고정이라 할당은 없다.
+    std::copy(stacked_frames_.begin() + frame_size, stacked_frames_.end(), stacked_frames_.begin());
+  }
+  std::size_t f = 0;
+  for (double v : imu.angular_velocity) {newest[f++] = v;}
+  for (double v : imu.projected_gravity) {newest[f++] = v;}
+  for (std::size_t i = 0; i < n; ++i) {newest[f++] = positions_[i] - default_positions_[i];}
+  for (double v : velocities_) {newest[f++] = v;}
+  for (double v : last_actions_) {newest[f++] = v;}
+  if (stacked_frames_empty_) {
+    for (std::size_t h = 0; h + 1 < frames; ++h) {
+      std::copy(newest, newest + frame_size, &stacked_frames_[h * frame_size]);
+    }
+    stacked_frames_empty_ = false;
+  }
+
+  // 항목 (프레임 안 시작 위치, 크기): gyro, gravity, joint_pos, joint_vel, actions.
+  const std::size_t term_offset[5] = {0, 3, 6, 6 + n, 6 + 2 * n};
+  const std::size_t term_size[5] = {3, 3, n, n, n};
   std::size_t k = 0;
-  for (double v : imu.angular_velocity) {
-    observation_[k++] = v;
-  }
-  for (double v : imu.projected_gravity) {
-    observation_[k++] = v;
-  }
-  for (std::size_t i = 0; i < joints_.size(); ++i) {
-    observation_[k++] = positions_[i] - default_positions_[i];
-  }
-  for (double v : velocities_) {
-    observation_[k++] = v;
-  }
-  for (double v : last_actions_) {
-    observation_[k++] = v;
+  for (std::size_t t = 0; t < 5; ++t) {
+    for (std::size_t h = 0; h < frames; ++h) {
+      const double * src = &stacked_frames_[h * frame_size + term_offset[t]];
+      std::copy(src, src + term_size[t], &observation_[k]);
+      k += term_size[t];
+    }
   }
   for (double v : command.velocity) {
     observation_[k++] = v;
@@ -995,6 +1071,12 @@ void KidRlController::build_observation(const CommandSample & command, const Imu
     gait_phase_observation(
       gait_clock_.elapsed_s(), gait_cycle_time_s_, observation_[k], observation_[k + 1]);
     k += 2;
+  }
+  // hurdle_vision: 0.1 s 간격 11 프레임 (visible, x, y, z), 오래된 것부터. update() 가 이번
+  // 스텝 프레임을 넣은 뒤에 부른다. mjlab_kid_RL tasks/hurdle.py 의 hurdle_vision 과 같은 순서.
+  if (uses_hurdle_vision_) {
+    hurdle_vision_.write(&observation_[k]);
+    k += kHurdleVisionSize;
   }
 }
 
@@ -1427,6 +1509,12 @@ controller_interface::return_type KidRlController::update(
     now_ns - imu.stamp_ns >= 0 &&
     now_ns - imu.stamp_ns <= to_nanoseconds(imu_timeout_s_);
 
+  // /hurdle/pose 를 지난 정책 스텝 뒤에 새로 받았으면 이번 프레임은 [1, x, y, z], 아니면 0.
+  // 시간으로 유지하지 않는다: 한 번 받은 위치는 한 정책 스텝에만 들어간다.
+  const HurdlePoseSample hurdle_pose =
+    external_enabled_ ? external_.read_hurdle_pose_from_rt() : HurdlePoseSample{};
+  const bool hurdle_fresh = hurdle_pose.valid && hurdle_pose.stamp_ns > hurdle_pose_consumed_ns_;
+
   // gyro 저역통과 (imu_gyro_filter_hz). 관측에 들어가는 값만 거른다 -- 넘어짐 판정은
   // projected_gravity 를 쓰므로 영향이 없다. 모드와 무관하게 매 틱 갱신해 두어서
   // 정책이 시작될 때 필터가 이미 최근 움직임에 맞춰져 있다. IMU 가 끊기면 다시 시작한다.
@@ -1529,6 +1617,12 @@ controller_interface::return_type KidRlController::update(
           policy_first_setpoint_ = true;
           // 학습의 에피소드 시작과 같은 시점. 첫 관측은 위상 0 을 본다.
           gait_clock_.restart();
+          // 허들 관측도 학습의 리셋처럼 전부 0(못 봄)에서 시작한다.
+          hurdle_vision_.reset();
+          // 그 전에 받아 둔 위치는 쓰지 않는다. 진입 뒤에 새로 받은 것부터.
+          hurdle_pose_consumed_ns_ = now_ns;
+          // 쌓은 관측은 첫 프레임으로 모두 채운다(학습의 리셋 직후와 같다).
+          stacked_frames_empty_ = true;
           set_mode(Mode::POLICY_RUNNING, "enable_policy=true and entry checks passed");
         }
       }
@@ -1598,6 +1692,17 @@ controller_interface::return_type KidRlController::update(
           policy_accumulator_s_ =
             std::clamp(policy_accumulator_s_ - policy_period, -0.5 * policy_period,
             0.5 * policy_period);
+          // 정책 스텝(50 Hz)마다 이번 허들 프레임을 하나 넣는다. 새로 받은 위치는 여기서 소비된다.
+          if (uses_hurdle_vision_) {
+            const bool hurdle_new =
+              hurdle_pose.valid && hurdle_pose.stamp_ns > hurdle_pose_consumed_ns_;
+            if (hurdle_new) {hurdle_pose_consumed_ns_ = hurdle_pose.stamp_ns;}
+            hurdle_vision_.push(
+              hurdle_new ?
+              HurdleVisionHistory::Frame{1.0, hurdle_pose.position[0], hurdle_pose.position[1],
+                hurdle_pose.position[2]} :
+              HurdleVisionHistory::Frame{});
+          }
           build_observation(command, imu);
           if (!run_policy()) {
             enter_fault("policy inference failed", false);
@@ -1644,7 +1749,7 @@ controller_interface::return_type KidRlController::update(
 
   // 모드 기계가 끝난 뒤에 기록한다. 그래야 이번 틱에 실제로 나간 target 과
   // 그때의 모드가 같은 줄에 남는다.
-  log_tick(dt, command, imu, command_fresh, imu_fresh);
+  log_tick(dt, command, imu, command_fresh, imu_fresh, hurdle_pose, hurdle_fresh);
 
   if (!write_commands() || !write_gain_commands()) {
     return controller_interface::return_type::ERROR;

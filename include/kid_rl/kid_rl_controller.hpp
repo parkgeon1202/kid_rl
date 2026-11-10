@@ -23,6 +23,7 @@
 #include "kid_rl/rx_missing_monitor.hpp"
 #include "kid_rl/bus_timing_monitor.hpp"
 #include "kid_rl/gait_phase.hpp"
+#include "kid_rl/hurdle_vision.hpp"
 #include "kid_rl/lowpass.hpp"
 #include "rclcpp/subscription.hpp"
 #include "realtime_tools/realtime_buffer.hpp"
@@ -134,6 +135,17 @@ private:
   double gait_cycle_time_s_{0.0};
   bool uses_gait_phase_{false};
   GaitClock gait_clock_;
+  /// 모델 메타데이터 observation_names 끝에 hurdle_vision 이 있으면 참. 관측 끝에 44 칸이 붙는다.
+  bool uses_hurdle_vision_{false};
+  /// 정책 스텝마다 이번 /hurdle/pose 프레임을 넣는다. POLICY_RUNNING 진입(= 학습의 리셋) 때 비운다.
+  HurdleVisionHistory hurdle_vision_;
+  /// 쌓아 넣는 관측(base_ang_vel, projected_gravity, joint_pos, joint_vel, actions)의 프레임 수.
+  /// 모델 입력 폭에서 구한다(허들 태스크 5, 평지 1). 프레임은 정책 스텝(20 ms)마다 하나다.
+  std::size_t observation_history_{1};
+  /// 한 프레임 = 위 다섯 항목 (6 + 3n 칸). observation_history_ 개를 오래된 것부터 둔다.
+  std::vector<double> stacked_frames_;
+  /// 참이면 다음 프레임으로 모든 칸을 채운다(mjlab CircularBuffer 가 리셋 뒤 첫 값으로 채우는 것과 같다).
+  bool stacked_frames_empty_{true};
   bool action_clip_warned_{false};
   /// gyro 관측 1차 저역통과 컷오프 [Hz]. 0 이면 끈다. 학습의 gyro 필터와 같은 값이어야 한다.
   double imu_gyro_filter_hz_{0.0};
@@ -235,7 +247,7 @@ private:
   std::uint64_t log_tick_{0};
   double log_time_s_{0.0};
   void log_tick(double dt, const CommandSample & command, const ImuSample & imu,
-    bool command_fresh, bool imu_fresh);
+    bool command_fresh, bool imu_fresh, const HurdlePoseSample & hurdle_pose, bool hurdle_fresh);
 
   // Interface index maps, resolved by name in on_activate().
   std::vector<std::size_t> position_state_index_, velocity_state_index_;
@@ -278,6 +290,11 @@ private:
   std::array<double, 3> walk_command_max_{0.4, 0.3, 0.7};
   rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr walk_command_subscription_;
   realtime_tools::RealtimeBuffer<CommandSample> walk_command_buffer_;
+
+  // 허들 자세: ExternalCommands 가 /hurdle/pose 를 받아 두고 update() 가 읽는다.
+  // 지난 정책 스텝 뒤에 새로 받았으면 이번 프레임은 [1, x, y, z], 아니면 [0, 0, 0, 0].
+  // 이미 버퍼에 넣은 위치의 수신 시각(steady). 이보다 늦게 받은 것만 새 프레임이다.
+  std::int64_t hurdle_pose_consumed_ns_{0};
 
   // 보행 정지 상태(std_msgs/Bool, walk_state.topic): true = SAFE_HOLD 이고 enable_policy=false 라
   // 다리가 외부 명령(/dynamixel_control)을 따른다. task planner 는 이게 true 가 된 뒤에 모션이나

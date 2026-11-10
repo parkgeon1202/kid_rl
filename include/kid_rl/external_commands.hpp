@@ -16,6 +16,8 @@
 #include "dynamixel_interfaces/msg/dynamixel_msgs.hpp"
 #include "dynamixel_interfaces/msg/dynamixel_state_msgs.hpp"
 #include "dynamixel_interfaces/msg/pan_tilt.hpp"
+#include "geometry_msgs/msg/pose_stamped.hpp"
+#include "kid_rl/hurdle_vision.hpp"
 #include "rclcpp/time.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "realtime_tools/realtime_buffer.hpp"
@@ -30,6 +32,7 @@ namespace kid_rl
 ///   /gripper_control    (DynamixelMsgs)        <- humanoid_manipulation
 ///   /RealsensePanTilt   (PanTilt, degree)      <- 비전 pan_tilt 노드 (tilt 만 쓴다)
 ///   /motor_status       (DynamixelStateMsgs)   -> motion_operator, humanoid_manipulation
+///   /hurdle/pose        (PoseStamped, m)       <- irc_vision refiner (허들을 찾은 프레임만)
 ///
 /// 예전 노드는 배열 순서로 모터를 맞췄다. 여기서는 원소마다 id 를 받아 robot_description 의
 /// <관절>_dxl gpio ID 와 맞춘다. 설정에 없는 id, 중복 id, 유한하지 않은 값, 그리퍼 토픽인데
@@ -47,6 +50,7 @@ public:
     std::string gripper_topic{"/gripper_control"};
     std::string pan_tilt_topic{"/RealsensePanTilt"};
     std::string status_topic{"/motor_status"};
+    std::string hurdle_pose_topic{"/hurdle/pose"};
     int gripper_id{6};
     int tilt_id{23};
     double status_rate_hz{50.0};
@@ -87,6 +91,10 @@ public:
     const std::vector<double> & policy_positions, const std::vector<double> & policy_velocities,
     const std::vector<double> & hold_positions, const std::vector<double> & hold_velocities);
 
+  /// 제어 스레드: 마지막 /hurdle/pose (받은 순간의 정상 시계, 수신 주기 포함). 받은 적이
+  /// 없으면 valid=false. 할당하지 않는다.
+  HurdlePoseSample read_hurdle_pose_from_rt();
+
   /// 받은/버린 메시지 수 (진단용).
   std::uint64_t accepted() const;
   std::uint64_t rejected() const;
@@ -107,6 +115,7 @@ private:
   void control_callback(dynamixel_interfaces::msg::DynamixelControlMsgs::SharedPtr msg);
   void gripper_callback(dynamixel_interfaces::msg::DynamixelMsgs::SharedPtr msg);
   void pan_tilt_callback(dynamixel_interfaces::msg::PanTilt::SharedPtr msg);
+  void hurdle_pose_callback(geometry_msgs::msg::PoseStamped::SharedPtr msg);
 
   std::shared_ptr<rclcpp_lifecycle::LifecycleNode> node_;
   Config config_;
@@ -125,6 +134,11 @@ private:
     control_subscription_;
   rclcpp::Subscription<dynamixel_interfaces::msg::DynamixelMsgs>::SharedPtr gripper_subscription_;
   rclcpp::Subscription<dynamixel_interfaces::msg::PanTilt>::SharedPtr pan_tilt_subscription_;
+
+  // /hurdle/pose. 콜백 스레드만 hurdle_pose_last_receive_ns_ 를 쓴다(수신 주기 계산용).
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr hurdle_pose_subscription_;
+  realtime_tools::RealtimeBuffer<HurdlePoseSample> hurdle_pose_buffer_;
+  std::int64_t hurdle_pose_last_receive_ns_{0};
 
   // 상태 퍼블리시. 순서는 ID 오름차순.
   using StatusMsg = dynamixel_interfaces::msg::DynamixelStateMsgs;

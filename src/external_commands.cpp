@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "hardware_interface/component_parser.hpp"
+#include "kid_rl/input_types.hpp"
 #include "rclcpp/logging.hpp"
 
 namespace kid_rl
@@ -132,6 +133,13 @@ bool ExternalCommands::configure(
       config_.pan_tilt_topic, rclcpp::QoS(10),
       std::bind(&ExternalCommands::pan_tilt_callback, this, std::placeholders::_1));
   }
+  hurdle_pose_buffer_.writeFromNonRT(HurdlePoseSample{});
+  hurdle_pose_last_receive_ns_ = 0;
+  if (!config_.hurdle_pose_topic.empty()) {
+    hurdle_pose_subscription_ = node_->create_subscription<geometry_msgs::msg::PoseStamped>(
+      config_.hurdle_pose_topic, rclcpp::QoS(1),
+      std::bind(&ExternalCommands::hurdle_pose_callback, this, std::placeholders::_1));
+  }
   if (!config_.status_topic.empty() && config_.status_rate_hz > 0.0) {
     status_publisher_ = node_->create_publisher<StatusMsg>(config_.status_topic, best_effort);
     status_rt_publisher_ =
@@ -141,10 +149,10 @@ bool ExternalCommands::configure(
   RCLCPP_INFO(
     logger,
     "external commands: %zu motors addressable by ID; control '%s', gripper '%s' (ID %d), "
-    "pan_tilt '%s' (tilt ID %d), status '%s' at %.1f Hz",
+    "pan_tilt '%s' (tilt ID %d), status '%s' at %.1f Hz, hurdle pose '%s'",
     status_slots_.size(), config_.control_topic.c_str(), config_.gripper_topic.c_str(),
     config_.gripper_id, config_.pan_tilt_topic.c_str(), config_.tilt_id,
-    config_.status_topic.c_str(), config_.status_rate_hz);
+    config_.status_topic.c_str(), config_.status_rate_hz, config_.hurdle_pose_topic.c_str());
   return true;
 }
 
@@ -153,6 +161,7 @@ void ExternalCommands::reset()
   control_subscription_.reset();
   gripper_subscription_.reset();
   pan_tilt_subscription_.reset();
+  hurdle_pose_subscription_.reset();
   status_rt_publisher_.reset();
   status_publisher_.reset();
   node_.reset();
@@ -167,6 +176,37 @@ int ExternalCommands::slot_of(int id) const
 const std::vector<ExternalCommands::MotionCommand> & ExternalCommands::read_from_rt()
 {
   return *buffer_.readFromRT();
+}
+
+HurdlePoseSample ExternalCommands::read_hurdle_pose_from_rt()
+{
+  const HurdlePoseSample * sample = hurdle_pose_buffer_.readFromRT();
+  return sample != nullptr ? *sample : HurdlePoseSample{};
+}
+
+void ExternalCommands::hurdle_pose_callback(geometry_msgs::msg::PoseStamped::SharedPtr msg)
+{
+  // 비실시간 executor 스레드. refiner 는 허들을 찾은 프레임에만 내므로, 받은 순간을
+  // 정상 시계로 찍어 두고 컨트롤러가 그 시각으로 "지난 정책 스텝 뒤 새로 받았나"를 본다. header.stamp
+  // (카메라 프레임 시각)는 쓰지 않는다: 학습의 hurdle_vision 도 파이프라인 지연을 품은 채
+  // 들어온 값을 그대로 본다.
+  if (msg == nullptr) {return;}
+  const auto & position = msg->pose.position;
+  if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z)) {
+    RCLCPP_WARN_THROTTLE(
+      node_->get_logger(), *node_->get_clock(), 1000,
+      "Dropped %s: non-finite position", config_.hurdle_pose_topic.c_str());
+    return;
+  }
+  const std::int64_t now_ns = steady_time_nanoseconds();
+  HurdlePoseSample sample;
+  sample.position = {position.x, position.y, position.z};
+  sample.stamp_ns = now_ns;
+  sample.period_ms = hurdle_pose_last_receive_ns_ > 0 ?
+    static_cast<double>(now_ns - hurdle_pose_last_receive_ns_) / 1.0e6 : -1.0;
+  sample.valid = true;
+  hurdle_pose_last_receive_ns_ = now_ns;
+  hurdle_pose_buffer_.writeFromNonRT(sample);
 }
 
 void ExternalCommands::reject(const char * topic, const std::string & reason)

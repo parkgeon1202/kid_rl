@@ -85,7 +85,8 @@ bool CsvLogger::start(
   std::string header =
     "t_s,dt_s,mode,imu_valid,imu_age_ms,command_fresh,"
     "gravity_x,gravity_y,gravity_z,gyro_x,gyro_y,gyro_z,cmd_vx,cmd_vy,cmd_wz,gait_phase,"
-    "policy_t_s,gyro_raw_x,gyro_raw_y,gyro_raw_z";
+    "policy_t_s,gyro_raw_x,gyro_raw_y,gyro_raw_z,"
+    "hurdle_fresh,hurdle_age_ms,hurdle_period_ms,hurdle_x,hurdle_y,hurdle_z";
   if (rx_missing_columns) {
     // rx_missing_ids 는 공백으로 구분한 ID 목록 ("7 13"). 한 열에 넣어야
     // 스프레드시트에서 틱별로 한눈에 보인다.
@@ -189,6 +190,10 @@ std::size_t CsvLogger::drain()
     append_double(row_, sample.gait_phase);
     append_double(row_, sample.policy_t_s);
     for (const double value : sample.gyro_raw) {append_double(row_, value);}
+    row_ += sample.hurdle_fresh != 0 ? "1," : "0,";
+    append_double(row_, sample.hurdle_age_ms);
+    append_double(row_, sample.hurdle_period_ms);
+    for (const double value : sample.hurdle_position) {append_double(row_, value);}
     if (rx_missing_columns_) {
       row_ += std::to_string(sample.rx_missing_count);
       row_ += ',';

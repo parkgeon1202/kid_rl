@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "kid_rl/hurdle_vision.hpp"
 #include "onnxruntime_cxx_api.h"  // NOLINT(build/include_subdir)
 
 namespace kid_rl
@@ -114,6 +115,9 @@ bool PolicyRunner::load(
   const std::vector<std::string> & base_observation_names,
   std::size_t base_observation_size,
   bool & uses_gait_phase,
+  bool & uses_hurdle_vision,
+  std::size_t stacked_observation_size,
+  std::size_t & history_length,
   std::size_t expected_action_size,
   const std::vector<std::string> & expected_joint_names,
   const std::vector<double> & expected_default_positions,
@@ -123,6 +127,8 @@ bool PolicyRunner::load(
   reset();
   error.clear();
   uses_gait_phase = false;
+  uses_hurdle_vision = false;
+  history_length = 1;
 
   try {
     impl_->session_options.SetIntraOpNumThreads(1);
@@ -162,6 +168,10 @@ bool PolicyRunner::load(
       for (std::string name; std::getline(stream, name, ',');) {
         names.push_back(name);
       }
+      if (!names.empty() && names.back() == "hurdle_vision") {
+        uses_hurdle_vision = true;
+        names.pop_back();
+      }
       std::vector<std::string> with_phase = base_observation_names;
       with_phase.push_back("gait_phase");
       if (names == with_phase) {
@@ -173,8 +183,20 @@ bool PolicyRunner::load(
         return false;
       }
     }
+    const std::size_t single_frame_size = base_observation_size + (uses_gait_phase ? 2 : 0) +
+      (uses_hurdle_vision ? kHurdleVisionSize : 0);
+    // 쌓은 프레임 수는 입력 폭에서 구한다. 나누어떨어지지 않으면 1 로 두고 아래에서 거부된다.
+    const auto input_shape = input_info.GetShape();
+    if (input_shape.size() == 2 && stacked_observation_size > 0 &&
+      input_shape[1] > static_cast<std::int64_t>(single_frame_size))
+    {
+      const std::size_t extra = static_cast<std::size_t>(input_shape[1]) - single_frame_size;
+      if (extra % stacked_observation_size == 0) {
+        history_length = 1 + extra / stacked_observation_size;
+      }
+    }
     const std::size_t expected_observation_size =
-      base_observation_size + (uses_gait_phase ? 2 : 0);
+      single_frame_size + (history_length - 1) * stacked_observation_size;
 
     if (!has_shape(input_info.GetShape(), expected_observation_size) ||
       !has_shape(output_info.GetShape(), expected_action_size))

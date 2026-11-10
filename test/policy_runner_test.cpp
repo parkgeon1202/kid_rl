@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "kid_rl/hurdle_vision.hpp"
 #include "kid_rl/policy_runner.hpp"
 
 int main(int argc, char ** argv)
@@ -80,8 +81,12 @@ int main(int argc, char ** argv)
   kid_rl::PolicyRunner runner;
   std::string error;
   bool uses_gait_phase = false;
+  bool uses_hurdle_vision = false;
+  std::size_t history_length = 0;
+  const std::size_t stacked_size = 3 + 3 + 3 * joints.size();
   if (!runner.load(
-      argv[1], base_names, base_size, uses_gait_phase, 25, joints, defaults, action_scale, error))
+      argv[1], base_names, base_size, uses_gait_phase, uses_hurdle_vision, stacked_size,
+      history_length, 25, joints, defaults, action_scale, error))
   {
     std::cerr << "load failed: " << error << '\n';
     return 1;
@@ -90,7 +95,8 @@ int main(int argc, char ** argv)
     std::cerr << "gait_phase detection " << uses_gait_phase << " != golden " << golden_gait << '\n';
     return 1;
   }
-  const std::size_t observation_size = base_size + (uses_gait_phase ? 2 : 0);
+  const std::size_t observation_size = base_size + (uses_gait_phase ? 2 : 0) +
+    (uses_hurdle_vision ? kid_rl::kHurdleVisionSize : 0) + (history_length - 1) * stacked_size;
   if (observation_size != golden_size || observation.size() != golden_size) {
     std::cerr << "observation size " << observation_size << " != golden " << golden_size << '\n';
     return 1;
@@ -101,10 +107,13 @@ int main(int argc, char ** argv)
     kid_rl::PolicyRunner wrong;
     std::string wrong_error;
     bool wrong_gait = false;
+    bool wrong_hurdle = false;
+    std::size_t wrong_history = 0;
     std::vector<std::string> swapped = base_names;
     std::swap(swapped[0], swapped[1]);
     if (wrong.load(
-        argv[1], swapped, base_size, wrong_gait, 25, joints, defaults, action_scale, wrong_error))
+        argv[1], swapped, base_size, wrong_gait, wrong_hurdle, stacked_size, wrong_history, 25,
+        joints, defaults, action_scale, wrong_error))
     {
       std::cerr << "load accepted a controller with a different observation order\n";
       return 1;
